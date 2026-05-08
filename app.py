@@ -1,15 +1,25 @@
 import os
 import sys
 import json
-import shutil
+import time
+import html as html_lib
+import re
+import secrets
 import subprocess
+import urllib.parse
+from datetime import datetime
 from pathlib import Path
 from flask import (
     Flask, render_template, request, Response,
-    stream_with_context, session, jsonify, send_from_directory, abort
+    stream_with_context, session, jsonify, send_from_directory, abort, redirect
 )
-from dotenv import load_dotenv
+import requests as http
 import anthropic
+
+
+# ---------------------------------------------------------------------------
+# Env loader
+# ---------------------------------------------------------------------------
 
 def _load_env():
     env_path = Path(__file__).resolve().parent / ".env"
@@ -24,12 +34,15 @@ def _load_env():
 _load_env()
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
+app.secret_key = os.environ.get("FLASK_SECRET", os.urandom(24))
 
 PROJECT_ROOT = Path(__file__).parent
+OUTPUTS_DIR  = PROJECT_ROOT / "outputs"
+OUTPUTS_DIR.mkdir(exist_ok=True)
+
 
 # ---------------------------------------------------------------------------
-# Anthropic client (Haiku for generation)
+# Anthropic (Haiku for generation)
 # ---------------------------------------------------------------------------
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
@@ -45,49 +58,442 @@ def make_anthropic_client():
 
 anthropic_client = make_anthropic_client()
 
+
 # ---------------------------------------------------------------------------
-# Locate claude CLI
+# Atlassian OAuth 2.0 (3LO) — token management
 # ---------------------------------------------------------------------------
 
-def find_claude():
-    for name in ("claude", "claude.cmd", "claude.exe"):
-        found = shutil.which(name)
-        if found:
-            return found
-    candidates = [
-        os.path.expandvars(r"%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"),
-        os.path.expandvars(r"%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"),
-        os.path.expandvars(r"%APPDATA%\npm\claude.cmd"),
-        os.path.expandvars(r"%APPDATA%\npm\claude"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\claude\claude.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Claude\resources\app\bin\claude"),
-    ]
-    for c in candidates:
-        if c and os.path.exists(c):
-            return c
+ATLASSIAN_CLIENT_ID     = os.environ.get("ATLASSIAN_CLIENT_ID", "")
+ATLASSIAN_CLIENT_SECRET = os.environ.get("ATLASSIAN_CLIENT_SECRET", "")
+ATLASSIAN_REDIRECT_URI  = os.environ.get("ATLASSIAN_REDIRECT_URI",
+                                          "http://localhost:5001/oauth/callback")
+
+_ATLASSIAN_AUTH_URL  = "https://auth.atlassian.com/authorize"
+_ATLASSIAN_TOKEN_URL = "https://auth.atlassian.com/oauth/token"
+_ATLASSIAN_RES_URL   = "https://api.atlassian.com/oauth/token/accessible-resources"
+
+ATLASSIAN_SCOPES = " ".join([
+    "read:jira-work",
+    "write:jira-work",
+    "read:jira-user",
+    "read:confluence-content.all",
+    "write:confluence-content",
+    "offline_access",
+    "read:me",
+])
+
+TOKENS_FILE = PROJECT_ROOT / ".atlassian_tokens.json"
+
+
+def load_tokens():
+    if TOKENS_FILE.exists():
+        try:
+            return json.loads(TOKENS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return None
     return None
 
-CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or find_claude()
 
-def is_cmd_file(path):
-    return path and path.lower().endswith(".cmd")
+def save_tokens(tokens):
+    TOKENS_FILE.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
+
+
+def clear_tokens():
+    if TOKENS_FILE.exists():
+        TOKENS_FILE.unlink()
+
+
+def _do_refresh(refresh_token):
+    try:
+        r = http.post(_ATLASSIAN_TOKEN_URL, json={
+            "grant_type":    "refresh_token",
+            "client_id":     ATLASSIAN_CLIENT_ID,
+            "client_secret": ATLASSIAN_CLIENT_SECRET,
+            "refresh_token": refresh_token,
+        }, timeout=15)
+        if r.ok:
+            data = r.json()
+            data["expires_at"] = time.time() + data.get("expires_in", 3600) - 60
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def get_valid_token():
+    """Return a valid access token, refreshing if expired. Returns None if not connected."""
+    tokens = load_tokens()
+    if not tokens:
+        return None
+    if tokens.get("expires_at", 0) < time.time():
+        new = _do_refresh(tokens.get("refresh_token", ""))
+        if not new:
+            return None
+        for k in ("cloud_id", "cloud_url"):
+            if k in tokens and k not in new:
+                new[k] = tokens[k]
+        save_tokens(new)
+        tokens = new
+    return tokens.get("access_token")
+
+
+def get_cloud_info():
+    """Returns (cloud_id, cloud_url). Cached in token file after first call."""
+    tokens = load_tokens()
+    if not tokens:
+        return None, None
+    if "cloud_id" in tokens:
+        return tokens["cloud_id"], tokens.get("cloud_url", "")
+    access_token = get_valid_token()
+    if not access_token:
+        return None, None
+    try:
+        r = http.get(_ATLASSIAN_RES_URL,
+                     headers={"Authorization": f"Bearer {access_token}"},
+                     timeout=10)
+        resources = r.json()
+        if resources:
+            cloud_id  = resources[0]["id"]
+            cloud_url = resources[0].get("url", "")
+            tokens["cloud_id"]  = cloud_id
+            tokens["cloud_url"] = cloud_url
+            save_tokens(tokens)
+            return cloud_id, cloud_url
+    except Exception:
+        pass
+    return None, None
+
 
 # ---------------------------------------------------------------------------
-# Command routing: which commands use Haiku vs Claude CLI
+# Atlassian API helpers
 # ---------------------------------------------------------------------------
 
-# These commands generate content locally with Haiku, then optionally push
-GENERATION_COMMANDS = {"story", "brainstorm", "doc-feature", "idea", "deck"}
+def _auth_headers():
+    token = get_valid_token()
+    if not token:
+        raise RuntimeError("Not connected to Atlassian. Click 'Connect to Jira' in the header.")
+    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-# These commands have a push action after editing (brainstorm is analysis-only)
-PUSH_COMMANDS = {"story", "doc-feature", "idea", "deck"}
 
-PUSH_LABELS = {
-    "story":       "Create Jira Story",
-    "doc-feature": "Publish to Confluence",
-    "idea":        "Create Roadmap Item",
-    "deck":        "Build PowerPoint",
-}
+def _atlassian_error(r, system="Jira"):
+    """Extract a readable error message from a failed Atlassian response."""
+    try:
+        body = r.json()
+        msgs = body.get("errorMessages") or []
+        errs = body.get("errors") or {}
+        detail = body.get("message") or body.get("detail") or ""
+        parts = list(msgs) + [f"{k}: {v}" for k, v in errs.items()] + ([detail] if detail else [])
+        msg = " | ".join(parts) if parts else json.dumps(body)[:300]
+    except Exception:
+        msg = r.text[:300]
+    if r.status_code == 403:
+        return (f"{system} 403 Forbidden — your OAuth token may be missing write scopes. "
+                f"Click your name in the header → Disconnect, then reconnect Jira. Detail: {msg}")
+    return f"{system} {r.status_code}: {msg}"
+
+
+def jira_req(method, path, **kwargs):
+    cloud_id, _ = get_cloud_info()
+    if not cloud_id:
+        raise RuntimeError("Could not get Atlassian cloud ID.")
+    url     = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3{path}"
+    headers = _auth_headers()
+    if method.upper() in ("POST", "PUT", "PATCH"):
+        headers["Content-Type"] = "application/json"
+    r = http.request(method, url, headers=headers, timeout=30, **kwargs)
+    if not r.ok:
+        raise RuntimeError(_atlassian_error(r, "Jira"))
+    return r.json() if r.content else {}
+
+
+def agile_req(method, path, **kwargs):
+    cloud_id, _ = get_cloud_info()
+    if not cloud_id:
+        raise RuntimeError("Could not get Atlassian cloud ID.")
+    url     = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/agile/1.0{path}"
+    headers = _auth_headers()
+    r = http.request(method, url, headers=headers, timeout=30, **kwargs)
+    r.raise_for_status()
+    return r.json() if r.content else {}
+
+
+def conf_req(method, path, **kwargs):
+    cloud_id, _ = get_cloud_info()
+    if not cloud_id:
+        raise RuntimeError("Could not get Atlassian cloud ID.")
+    url     = f"https://api.atlassian.com/ex/confluence/{cloud_id}/wiki/rest/api{path}"
+    headers = _auth_headers()
+    if method.upper() in ("POST", "PUT", "PATCH"):
+        headers["Content-Type"] = "application/json"
+    r = http.request(method, url, headers=headers, timeout=30, **kwargs)
+    if not r.ok:
+        raise RuntimeError(_atlassian_error(r, "Confluence"))
+    return r.json() if r.content else {}
+
+
+_conf_homepage_cache = {}   # space_key → page_id
+
+def _conf_space_homepage(space_key):
+    """Return the homepage page ID for a Confluence space (cached)."""
+    if space_key in _conf_homepage_cache:
+        return _conf_homepage_cache[space_key]
+    try:
+        data = conf_req("GET", f"/space/{space_key}?expand=homepage")
+        page_id = data.get("homepage", {}).get("id")
+        if page_id:
+            _conf_homepage_cache[space_key] = page_id
+        return page_id
+    except Exception:
+        return None
+
+
+def _conf_create_page(title, space_key, body_html):
+    """Create a Confluence page, using the space homepage as parent."""
+    payload = {
+        "type":  "page",
+        "title": title,
+        "space": {"key": space_key},
+        "body":  {"storage": {"value": body_html, "representation": "storage"}},
+    }
+    parent_id = _conf_space_homepage(space_key)
+    if parent_id:
+        payload["ancestors"] = [{"id": parent_id}]
+    return conf_req("POST", "/content", json=payload)
+
+
+def jira_url(key):
+    _, cloud_url = get_cloud_info()
+    return f"{cloud_url}/browse/{key}" if cloud_url else key
+
+
+def conf_url(page_id):
+    _, cloud_url = get_cloud_info()
+    return f"{cloud_url}/wiki/spaces/UPP/pages/{page_id}" if cloud_url else page_id
+
+
+# ---------------------------------------------------------------------------
+# Content conversion utilities
+# ---------------------------------------------------------------------------
+
+def extract_title(content, fallback="Untitled"):
+    """Extract the first heading or first non-empty line as a title."""
+    for line in content.split("\n"):
+        s = line.strip()
+        if s.startswith("## Feature Title"):
+            continue
+        for prefix in ("### ", "## ", "# "):
+            if s.startswith(prefix):
+                return s[len(prefix):].strip()[:120]
+    for line in content.split("\n"):
+        s = line.strip()
+        if s and not s.startswith("#"):
+            return s[:120]
+    return fallback
+
+
+def _inline_adf(text):
+    """Parse inline markdown (bold, italic, code) into a list of ADF text nodes."""
+    nodes = []
+    # Split on **bold**, *italic*, `code`  — order matters: ** before *
+    parts = re.split(r'(\*\*[^*\n]+?\*\*|\*[^*\n]+?\*|`[^`\n]+?`)', text)
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith('**') and part.endswith('**') and len(part) > 4:
+            nodes.append({"type": "text", "text": part[2:-2],
+                          "marks": [{"type": "strong"}]})
+        elif part.startswith('*') and part.endswith('*') and len(part) > 2:
+            nodes.append({"type": "text", "text": part[1:-1],
+                          "marks": [{"type": "em"}]})
+        elif part.startswith('`') and part.endswith('`') and len(part) > 2:
+            nodes.append({"type": "text", "text": part[1:-1],
+                          "marks": [{"type": "code"}]})
+        else:
+            # Merge adjacent plain-text nodes
+            if nodes and nodes[-1].get("type") == "text" and not nodes[-1].get("marks"):
+                nodes[-1]["text"] += part
+            else:
+                nodes.append({"type": "text", "text": part})
+    return nodes or [{"type": "text", "text": text}]
+
+
+def markdown_to_adf(text):
+    """Convert markdown to Atlassian Document Format."""
+    nodes = []
+    lines = text.split("\n")
+    i = 0
+
+    while i < len(lines):
+        line   = lines[i]
+        s      = line.strip()
+
+        # Horizontal rule
+        if re.match(r'^[-*_]{3,}\s*$', s):
+            nodes.append({"type": "rule"})
+            i += 1
+            continue
+
+        # Headings — markdown (## ) and Confluence wiki (h2.)
+        m = re.match(r'^(#{1,6})\s+(.+)$', s) or re.match(r'^h([1-6])\.\s+(.+)$', s)
+        if m:
+            raw_level = m.group(1)
+            level = len(raw_level) if raw_level.startswith('#') else int(raw_level)
+            nodes.append({"type": "heading",
+                          "attrs": {"level": max(1, min(6, level))},
+                          "content": _inline_adf(m.group(2).strip())})
+            i += 1
+            continue
+
+        # Bullet list
+        if re.match(r'^[-*]\s+', s):
+            items = []
+            while i < len(lines):
+                ls = lines[i].strip()
+                bm = re.match(r'^[-*]\s+(.+)$', ls)
+                if bm:
+                    items.append({"type": "listItem", "content": [
+                        {"type": "paragraph", "content": _inline_adf(bm.group(1))}
+                    ]})
+                    i += 1
+                else:
+                    break
+            nodes.append({"type": "bulletList", "content": items})
+            continue
+
+        # Numbered list
+        m2 = re.match(r'^\d+\.\s+(.+)$', s)
+        if m2:
+            items = []
+            while i < len(lines):
+                ls  = lines[i].strip()
+                nm  = re.match(r'^\d+\.\s+(.+)$', ls)
+                if nm:
+                    items.append({"type": "listItem", "content": [
+                        {"type": "paragraph", "content": _inline_adf(nm.group(1))}
+                    ]})
+                    i += 1
+                else:
+                    break
+            nodes.append({"type": "orderedList", "content": items})
+            continue
+
+        # Empty line → skip
+        if not s:
+            i += 1
+            continue
+
+        # Paragraph
+        nodes.append({"type": "paragraph", "content": _inline_adf(s)})
+        i += 1
+
+    if not nodes:
+        nodes.append({"type": "paragraph", "content": [{"type": "text", "text": text}]})
+    return {"version": 1, "type": "doc", "content": nodes}
+
+
+def _inline_html(text):
+    """Convert inline markdown to HTML for Confluence storage format."""
+    s = html_lib.escape(text)
+    s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"\*([^*\n]+?)\*",  r"<em>\1</em>",       s)
+    s = re.sub(r"`([^`\n]+?)`",    r"<code>\1</code>",    s)
+    return s
+
+
+def markdown_to_confluence(text):
+    """Convert markdown to Confluence storage format (XHTML-like)."""
+    out      = []
+    lines    = text.split("\n")
+    in_ul    = False
+    in_ol    = False
+    in_table = False
+
+    def close_lists():
+        nonlocal in_ul, in_ol
+        if in_ul:  out.append("</ul>"); in_ul = False
+        if in_ol:  out.append("</ol>"); in_ol = False
+
+    for line in lines:
+        s = line.strip()
+
+        # Close table if no longer in a table row
+        if in_table and not ("|" in line and s.startswith("|")):
+            out.append("</table>")
+            in_table = False
+
+        # Table
+        if "|" in line and s.startswith("|"):
+            if re.match(r"^\s*\|[-|\s:]+\|\s*$", line):
+                continue
+            close_lists()
+            if not in_table:
+                out.append("<table>")
+                in_table = True
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            out.append("<tr>" + "".join(f"<td>{_inline_html(c)}</td>" for c in cells) + "</tr>")
+            continue
+
+        # Headings — markdown (##) and Confluence wiki (h2.)
+        hm = re.match(r'^(#{1,6})\s+(.+)$', s) or re.match(r'^h([1-6])\.\s+(.+)$', s)
+        if hm:
+            close_lists()
+            raw = hm.group(1)
+            lvl = len(raw) if raw.startswith('#') else int(raw)
+            lvl = max(1, min(6, lvl))
+            out.append(f"<h{lvl}>{_inline_html(hm.group(2).strip())}</h{lvl}>")
+            continue
+
+        # Bullet list
+        bm = re.match(r'^[-*]\s+(.+)$', s)
+        if bm:
+            if in_ol: out.append("</ol>"); in_ol = False
+            if not in_ul: out.append("<ul>"); in_ul = True
+            out.append(f"<li>{_inline_html(bm.group(1))}</li>")
+            continue
+
+        # Numbered list
+        nm = re.match(r'^\d+\.\s+(.+)$', s)
+        if nm:
+            if in_ul: out.append("</ul>"); in_ul = False
+            if not in_ol: out.append("<ol>"); in_ol = True
+            out.append(f"<li>{_inline_html(nm.group(1))}</li>")
+            continue
+
+        # Horizontal rule
+        if re.match(r'^[-*_]{3,}\s*$', s):
+            close_lists()
+            out.append("<hr/>")
+            continue
+
+        # Empty line
+        if not s:
+            close_lists()
+            continue
+
+        # Paragraph
+        close_lists()
+        out.append(f"<p>{_inline_html(s)}</p>")
+
+    close_lists()
+    if in_table:
+        out.append("</table>")
+    return "\n".join(out)
+
+
+def build_adf_comment(text, mention_ids=None):
+    """Build ADF for a Jira comment, appending mentions at the end."""
+    para = [{"type": "text", "text": text}]
+    if mention_ids:
+        para.append({"type": "text", "text": "  "})
+        for name, account_id in mention_ids.items():
+            para.append({"type": "mention",
+                         "attrs": {"id": account_id,
+                                   "text": f"@{name}",
+                                   "accessLevel": ""}})
+            para.append({"type": "text", "text": " "})
+    return {"version": 1, "type": "doc",
+            "content": [{"type": "paragraph", "content": para}]}
+
 
 # ---------------------------------------------------------------------------
 # Squads & Commands
@@ -107,45 +513,71 @@ SQUADS = [
     {"key": "DENG",  "name": "Data Engineering"},
 ]
 
+# Product Area field value → squad key (used by doc-pvg)
+PRODUCT_AREA_TO_SQUAD = {
+    "SMS":                                 "SMS",
+    "Agent Console":                       "CB",
+    "CCaaS and Agent Console Integration": "CB",
+    "Audience":                            "PMRKT",
+    "Multi Channels Campaigns":            "PMRKT",
+    "Conversational AI":                   "AIS",
+    "Agentic CX":                          "ACX",
+    "Flow Studio":                         "JO",
+    "Voice":                               "VC",
+    "WhatsApp":                            "CON",
+    "Business Messaging":                  "CON",
+}
+
 COMMANDS = [
     # ── Daily Ops ────────────────────────────────────────────────────────────
     {
         "id": "daily", "name": "Daily Standup", "category": "Daily Ops",
-        "mode": "cli", "slug": "/daily", "needs_squad": True,
-        "description": "Sprint digest from Jira + Copilot meeting notes",
+        "mode": "generate", "jira_fetch": True, "slug": "/daily",
+        "needs_squad": True, "push_label": "",
+        "description": "Fetch active sprint from Jira → AI drafts standup digest",
         "inputs": [
             {"id": "notes", "label": "Copilot meeting summary (optional)",
              "type": "textarea", "required": False,
-             "placeholder": "Paste meeting notes here, or leave blank for a Jira-only digest..."},
+             "placeholder": "Paste meeting notes here, or leave blank…"},
         ],
     },
     {
         "id": "sprint-analysis", "name": "Sprint Analysis", "category": "Daily Ops",
-        "mode": "cli", "slug": "/sprint-analysis", "needs_squad": True,
-        "description": "Scan sprint for stale, blocked, and unassigned tickets",
-        "inputs": [],
+        "mode": "generate", "jira_fetch": True, "slug": "/sprint-analysis",
+        "needs_squad": True, "push_label": "",
+        "description": "Select a sprint → AI flags stale, blocked, and unassigned tickets",
+        "inputs": [
+            {"id": "sprint_id", "label": "Sprint", "type": "sprint-select",
+             "required": True, "placeholder": "Select a squad first…"},
+        ],
     },
     # ── Content ──────────────────────────────────────────────────────────────
     {
         "id": "story", "name": "Write User Story", "category": "Content",
-        "mode": "generate", "slug": "/story", "needs_squad": True,
-        "description": "Haiku drafts a user story → you edit → push creates the Jira ticket",
+        "mode": "generate", "jira_fetch": False, "slug": "/story",
+        "needs_squad": True, "push_label": "Create Jira Story",
+        "description": "AI drafts user story → you edit → creates Jira ticket via REST API",
         "inputs": [
             {"id": "description", "label": "Feature description",
              "type": "textarea", "required": True,
-             "placeholder": "Describe the feature or bug fix to turn into a user story..."},
+             "placeholder": "Describe the feature or bug fix…"},
         ],
     },
     {
         "id": "release-notes", "name": "Release Notes", "category": "Content",
-        "mode": "cli", "slug": "/release-notes", "needs_squad": True,
-        "description": "Pull Done Jira tickets → write release notes → publish to Confluence",
-        "inputs": [],
+        "mode": "generate", "jira_fetch": True, "slug": "/release-notes",
+        "needs_squad": True, "push_label": "Publish Release Notes",
+        "description": "Select a sprint → fetch Done tickets → AI writes release notes → publish to Confluence",
+        "inputs": [
+            {"id": "sprint_id", "label": "Sprint", "type": "sprint-select",
+             "required": True, "placeholder": "Select a squad first…"},
+        ],
     },
     {
         "id": "doc-pvg", "name": "Generate PVG", "category": "Content",
-        "mode": "cli", "slug": "/doc", "needs_squad": False,
-        "description": "Fetch UFRF2 item from Jira → generate Product Vision & Goal doc → create Epic",
+        "mode": "generate", "jira_fetch": True, "slug": "/doc",
+        "needs_squad": True, "push_label": "Publish PVG + Create Epic",
+        "description": "Fetch UFRF2 item → AI generates Product Vision & Goal doc → publish to Confluence + create Epic",
         "inputs": [
             {"id": "issue_key", "label": "UFRF2 issue key",
              "type": "text", "required": True, "placeholder": "e.g. UFRF2-123"},
@@ -153,18 +585,20 @@ COMMANDS = [
     },
     {
         "id": "doc-feature", "name": "Feature Documentation", "category": "Content",
-        "mode": "generate", "slug": "/doc", "needs_squad": False,
-        "description": "Haiku drafts user-facing documentation → you edit → push publishes to Confluence",
+        "mode": "generate", "jira_fetch": False, "slug": "/doc",
+        "needs_squad": False, "push_label": "Publish to Confluence",
+        "description": "AI drafts help-center docs → you edit → publishes to Confluence",
         "inputs": [
             {"id": "description", "label": "Feature description",
              "type": "textarea", "required": True,
-             "placeholder": "Describe the feature to document..."},
+             "placeholder": "Describe the feature to document…"},
         ],
     },
     {
         "id": "rfo", "name": "Reason For Outage", "category": "Content",
-        "mode": "cli", "slug": "/rfo", "needs_squad": False,
-        "description": "Fetch incident ticket from Jira → generate RFO → publish to Confluence",
+        "mode": "generate", "jira_fetch": True, "slug": "/rfo",
+        "needs_squad": False, "push_label": "Publish RFO",
+        "description": "Fetch incident ticket → AI drafts RFO → publish to Confluence",
         "inputs": [
             {"id": "ticket", "label": "Incident ticket key",
              "type": "text", "required": True, "placeholder": "e.g. CB-456"},
@@ -173,109 +607,354 @@ COMMANDS = [
     # ── Roadmap ──────────────────────────────────────────────────────────────
     {
         "id": "idea", "name": "Create Roadmap Item", "category": "Roadmap",
-        "mode": "generate", "slug": "/idea", "needs_squad": True,
-        "description": "Haiku drafts the roadmap item → you edit → push creates it in UFRF2",
+        "mode": "generate", "jira_fetch": False, "slug": "/idea",
+        "needs_squad": True, "push_label": "Create Roadmap Item",
+        "description": "AI drafts UFRF2 roadmap item → you edit → creates it via Jira REST API",
         "inputs": [
             {"id": "description", "label": "Feature idea",
              "type": "textarea", "required": True,
-             "placeholder": "Describe the feature idea for the roadmap..."},
+             "placeholder": "Describe the feature idea…"},
         ],
     },
     {
         "id": "brainstorm", "name": "Brainstorm", "category": "Roadmap",
-        "mode": "generate", "slug": "/brainstorm", "needs_squad": False,
-        "description": "Haiku stress-tests your idea — leads with weaknesses, then a recommendation",
+        "mode": "generate", "jira_fetch": False, "slug": "/brainstorm",
+        "needs_squad": False, "push_label": "",
+        "description": "AI stress-tests your idea — leads with weaknesses, then a recommendation",
         "inputs": [
             {"id": "idea", "label": "Idea to stress-test",
              "type": "textarea", "required": True,
-             "placeholder": "Describe the feature idea you want to brainstorm and challenge..."},
+             "placeholder": "Describe the feature idea you want to brainstorm…"},
         ],
     },
     {
         "id": "fcb-weekly", "name": "FCB Weekly Review", "category": "Roadmap",
-        "mode": "cli", "slug": "/fcb-weekly", "needs_squad": False,
-        "description": "Read Customer Askings from Jira — classify and recommend next actions",
+        "mode": "generate", "jira_fetch": True, "slug": "/fcb-weekly",
+        "needs_squad": False, "push_label": "",
+        "description": "Fetch Customer Askings updated this week → AI classifies and recommends actions",
         "inputs": [],
     },
     # ── Communication ────────────────────────────────────────────────────────
     {
         "id": "comment", "name": "Add Jira Comment", "category": "Communication",
-        "mode": "cli", "slug": "/comment", "needs_squad": False,
-        "description": "Post a comment on a Jira issue with optional @mentions",
+        "mode": "run", "jira_fetch": False, "slug": "/comment",
+        "needs_squad": False, "push_label": "",
+        "description": "Post a comment on any Jira issue with optional @mentions",
         "inputs": [
-            {"id": "issue_key", "label": "Jira issue key",
-             "type": "text", "required": True, "placeholder": "e.g. CB-123"},
+            {"id": "issue_key",    "label": "Jira issue key",
+             "type": "text",     "required": True, "placeholder": "e.g. JO-123"},
             {"id": "comment_text", "label": "Comment",
-             "type": "textarea", "required": True,
-             "placeholder": "Write your comment here..."},
-            {"id": "mentions", "label": "Tag people (optional)",
-             "type": "text", "required": False,
-             "placeholder": "e.g. John Smith, Sarah Lee"},
+             "type": "textarea", "required": True, "placeholder": "Write your comment…"},
+            {"id": "mentions",     "label": "Tag people (optional)",
+             "type": "text",     "required": False, "placeholder": "e.g. John Smith, Sarah Lee"},
         ],
     },
     # ── Intelligence ─────────────────────────────────────────────────────────
     {
         "id": "market-intel", "name": "Market Intel (Full)", "category": "Intelligence",
-        "mode": "python", "slug": "python:market_intel_digest.py", "needs_squad": False,
-        "description": "Monthly competitive digest — 4 competitor layers + MENA signals (30-day window)",
+        "mode": "python", "jira_fetch": False,
+        "slug": "python:market_intel_digest.py", "needs_squad": False, "push_label": "",
+        "description": "Monthly competitive digest — 4 layers + MENA signals (30-day window)",
         "inputs": [],
     },
     {
         "id": "market-intel-focused", "name": "Market Intel (AI Focus)", "category": "Intelligence",
-        "mode": "python", "slug": "python:market_intel_focused.py", "needs_squad": False,
+        "mode": "python", "jira_fetch": False,
+        "slug": "python:market_intel_focused.py", "needs_squad": False, "push_label": "",
         "description": "7-day focused digest — AI Marketing + AI Care only",
         "inputs": [],
     },
     # ── Presentations ────────────────────────────────────────────────────────
     {
         "id": "deck", "name": "Build Deck", "category": "Presentations",
-        "mode": "generate", "slug": "/deck", "needs_squad": False,
-        "description": "Haiku outlines the deck → you edit → push builds the branded PowerPoint file",
+        "mode": "generate", "jira_fetch": False, "slug": "/deck",
+        "needs_squad": False, "push_label": "Save Deck Outline",
+        "description": "AI outlines the deck → you edit → saves as Markdown file for download",
         "inputs": [
             {"id": "topic", "label": "Deck topic & audience",
              "type": "textarea", "required": True,
-             "placeholder": "Describe the presentation topic and audience (customer-facing or internal enablement)..."},
+             "placeholder": "Describe the topic and audience (customer-facing or internal)…"},
         ],
     },
 ]
 
 COMMANDS_MAP = {c["id"]: c for c in COMMANDS}
 
+# Max output tokens per command — long-form docs need more room (Haiku cap: 8192)
+COMMAND_MAX_TOKENS = {
+    "doc-pvg":        8192,
+    "rfo":            8192,
+    "release-notes":  8192,
+    "doc-feature":    6000,
+    "daily":          3000,
+    "sprint-analysis":3000,
+    "fcb-weekly":     4096,
+    "story":          2048,
+    "idea":           2048,
+    "brainstorm":     3000,
+    "deck":           6000,
+}
+
+
 # ---------------------------------------------------------------------------
-# Haiku system prompts
+# Haiku prompts
 # ---------------------------------------------------------------------------
 
 UNIFONIC_CONTEXT = """You are an experienced product manager at Unifonic, a CPaaS and AI-native CX platform serving enterprise customers in Saudi Arabia and the GCC. Unifonic's products include WhatsApp Business API, SMS, Voice, Flow Studio (journey automation), Chatbot Builder, Agent Console, CDP, and MCC (Marketing Campaign Cloud). The company is positioning as an Agentic CX platform and is targeting IPO readiness."""
 
 HAIKU_PROMPTS = {
+
+    "daily": {
+        "system": f"""{UNIFONIC_CONTEXT}
+
+Generate a concise, useful daily standup digest for a product squad. Use the live sprint data provided.
+
+Output format:
+## Sprint Health
+[1-2 sentences: overall sprint progress and risk level]
+
+## In Progress
+[bullet list of what's actively being worked on, with ticket keys]
+
+## Blockers & Risks
+[bullet list — or "None identified"]
+
+## Decisions Needed
+[items requiring PM attention — or "None"]
+
+## Today's Focus
+[2-3 recommended priorities based on the sprint data]
+
+Keep it short and actionable. PMs read this in under 60 seconds.""",
+        "user": lambda squad, inputs, context=None: (
+            f"Squad: {squad}\n\n"
+            f"Sprint Data:\n{context or 'No sprint data available.'}\n\n"
+            + (f"Meeting Notes:\n{inputs.get('notes')}\n" if inputs.get("notes") else "")
+        ),
+    },
+
+    "sprint-analysis": {
+        "system": f"""{UNIFONIC_CONTEXT}
+
+Analyze the sprint data and produce an actionable sprint health report. Flag issues clearly and recommend specific actions.
+
+Output format:
+## Sprint Summary
+[Sprint name, total issues, completion %, days remaining if available]
+
+## ⚠ Issues Requiring Attention
+[List each problem with ticket key, what's wrong, and recommended action]
+Use these categories: STALE (no updates 3+ days), BLOCKED, UNASSIGNED, OVERDUE, MISSING POINTS
+
+## DoR/DoD Violations
+[Tickets that appear to violate Definition of Ready or Done — or "None"]
+
+## Recommended Actions
+[Numbered list of specific PM actions to take today]
+
+Be direct. Skip the fluffy preamble.""",
+        "user": lambda squad, inputs, context=None: (
+            f"Squad: {squad}\n\nSprint Data:\n{context or 'No sprint data available.'}"
+        ),
+    },
+
     "story": {
         "system": f"""{UNIFONIC_CONTEXT}
 
-Write a Jira user story in the standard format used by the team. Be specific and professional.
+Write a Jira user story in standard format. Be specific and professional.
 
-Output format (use exactly this structure):
+Output format:
 ## User Story
 **As a** [user type], **I want to** [action], **so that** [benefit].
 
 ## Acceptance Criteria
 - **Given** [context], **When** [action], **Then** [expected result]
-
 (Write 3–5 acceptance criteria)
 
 ## Story Points
 [Estimate: 1, 2, 3, 5, or 8 — with a one-line rationale]
 
 ## Dependencies & Notes
-[Any dependencies, edge cases, or technical notes — or "None"]
+[Dependencies, edge cases, or technical notes — or "None"]
 
-Use business language in the story itself. Keep acceptance criteria precise and testable.""",
-        "user": lambda squad, inputs: f"Squad: {squad}\n\nFeature: {inputs.get('description', '')}",
+Use business language. Keep acceptance criteria precise and testable.""",
+        "user": lambda squad, inputs, context=None: (
+            f"Squad: {squad}\n\nFeature: {inputs.get('description', '')}"
+        ),
+    },
+
+    "release-notes": {
+        "system": f"""{UNIFONIC_CONTEXT}
+
+Write customer-facing release notes from the completed sprint tickets provided.
+Group changes by type. Use clear, non-technical language. Be concise.
+
+Output format:
+## Release Notes — [Squad Name] — [current month year]
+
+### ✨ New Features
+- [Feature name]: [One sentence describing what it does and the value to customers]
+
+### 🛠 Improvements
+- [Item]: [What improved and why it matters]
+
+### 🐛 Bug Fixes
+- [Fix description]
+
+### 📝 Notes
+[Any important migration notes, deprecations, or caveats — or omit this section]
+
+Do not include internal ticket numbers in the customer-facing output. Keep each bullet to one concise sentence.""",
+        "user": lambda squad, inputs, context=None: (
+            f"Squad: {squad}\n\nCompleted tickets:\n{context or 'No completed tickets found.'}"
+        ),
+    },
+
+    "doc-pvg": {
+        "system": f"""{UNIFONIC_CONTEXT}
+
+Write a detailed Product Vision & Goal (PVG) document from the UFRF2 roadmap item provided.
+This is an internal product strategy document used to align the squad before development.
+
+Output format:
+## Product Vision & Goal
+
+### Background & Problem Statement
+[What problem are we solving? Who has it? What happens today?]
+
+### Vision
+[One crisp sentence: what does success look like for this feature?]
+
+### Goals
+[3-5 measurable goals — tie to revenue, retention, adoption, or compliance]
+
+### Non-Goals
+[What we are explicitly NOT doing in this scope]
+
+### Target Users
+[Specific personas and their pain points]
+
+### Success Metrics
+[2-4 KPIs with targets]
+
+### High-Level Solution
+[2-3 paragraphs: the approach, key capabilities, how it fits the platform]
+
+### Dependencies
+[Teams, systems, or external partners needed]
+
+### Risks & Open Questions
+[Known risks and decisions still to be made]
+
+Be specific to Unifonic's context. Write for a senior PM audience.""",
+        "user": lambda squad, inputs, context=None: (
+            f"Squad: {squad}\n\nUFRF2 Item:\n{context or 'No item data found.'}"
+        ),
+    },
+
+    "doc-feature": {
+        "system": f"""{UNIFONIC_CONTEXT}
+
+Write user-facing feature documentation for the Unifonic help center.
+Clear, structured, non-technical where possible.
+
+Output format:
+## Overview
+[1–2 sentences: what this feature does and why it matters]
+
+## Who Is This For
+[Target users/personas]
+
+## How It Works
+[Step-by-step or key capabilities, 3–6 items]
+
+## Configuration
+[Setup or prerequisites — or "No configuration required"]
+
+## FAQ
+**Q: [common question]**
+A: [answer]
+(2–3 FAQs)
+
+Use plain language. This is customer-facing documentation.""",
+        "user": lambda squad, inputs, context=None: (
+            f"Feature to document:\n\n{inputs.get('description', '')}"
+        ),
+    },
+
+    "rfo": {
+        "system": f"""{UNIFONIC_CONTEXT}
+
+Write a formal Reason For Outage (RFO) document from the incident ticket data provided.
+This is shared with customers and senior leadership. Be factual, clear, and professional.
+
+Output format:
+## Incident Summary
+**Date/Time:** [from ticket]
+**Duration:** [calculated or stated]
+**Severity:** [from ticket or inferred]
+**Affected Services:** [from ticket]
+
+## Timeline of Events
+| Time | Event |
+|------|-------|
+[Chronological table of key events]
+
+## Root Cause
+[Clear, factual description of what caused the incident]
+
+## Impact
+[What customers experienced. Quantify where possible.]
+
+## Resolution
+[What was done to restore service]
+
+## Prevention
+[3-5 specific actions to prevent recurrence, with owners if mentioned]
+
+## Communication Sent
+[Summary of customer communications during the incident — or "None"]
+
+Be factual. No speculation. Use professional language suitable for customer-facing disclosure.""",
+        "user": lambda squad, inputs, context=None: (
+            f"Incident ticket:\n{context or 'No incident data found.'}"
+        ),
+    },
+
+    "idea": {
+        "system": f"""{UNIFONIC_CONTEXT}
+
+Write a UFRF2 internal roadmap item. Use business language — no technical jargon.
+Descriptions must explain value to customers and the business, not implementation details.
+
+Output format:
+## Feature Title
+[Short, clear title — max 8 words]
+
+## Description
+[2–3 sentences in business language: what it does, who it's for, and why it matters.
+Write as if explaining to a non-technical executive.]
+
+## Business Value
+[Revenue impact, customer retention, competitive advantage, or compliance — be specific]
+
+## Target Users
+[Which customer personas or internal teams benefit]
+
+## Success Metrics
+[How you'd measure success: 2–3 specific metrics]
+
+Keep it concise. Unifonic targets enterprise customers in KSA and the GCC.""",
+        "user": lambda squad, inputs, context=None: (
+            f"Squad: {squad}\n\nFeature idea:\n\n{inputs.get('description', '')}"
+        ),
     },
 
     "brainstorm": {
         "system": f"""{UNIFONIC_CONTEXT}
 
-You are a critical product strategy advisor. Stress-test this PM's feature idea. Lead with weaknesses and risks — don't be encouraging upfront. Force real trade-offs. Then give a structured recommendation.
+You are a critical product strategy advisor. Stress-test this PM's feature idea.
+Lead with weaknesses and risks — don't be encouraging upfront. Force real trade-offs.
 
 Output format:
 ## ⚠ Weaknesses & Risks
@@ -289,61 +968,38 @@ Output format:
 ## Recommendation
 One clear recommendation with a concise rationale.
 
-Be direct. Do not pad with generic PM advice. This is for a senior PM who wants honest pushback.""",
-        "user": lambda squad, inputs: inputs.get("idea", ""),
+Be direct. No generic PM advice. This is for a senior PM who wants honest pushback.""",
+        "user": lambda squad, inputs, context=None: inputs.get("idea", ""),
     },
 
-    "doc-feature": {
+    "fcb-weekly": {
         "system": f"""{UNIFONIC_CONTEXT}
 
-Write user-facing feature documentation for the Unifonic help center. Clear, structured, non-technical where possible.
+Review the Customer Askings (FCB) items provided and produce a structured weekly review.
 
 Output format:
-## Overview
-[1–2 sentences: what this feature does and why it matters]
+## FCB Weekly Review — [current date]
+**Items reviewed:** [count]
 
-## Who Is This For
-[Target users/personas — e.g. campaign managers, IT admins]
+### Needs Immediate Action
+[Items that are urgent, customer-escalated, or overdue]
 
-## How It Works
-[Step-by-step or key capabilities, 3–6 items]
+### Recommended for Roadmap
+[Items worth creating a UFRF2 roadmap entry for — include brief rationale]
 
-## Configuration
-[Any setup or prerequisites — or "No configuration required"]
+### Needs More Information
+[Items that are vague or need clarification before a decision]
 
-## FAQ
-**Q: [common question]**
-A: [answer]
+### No Action Needed
+[Items that are duplicates, out of scope, or already addressed]
 
-(2–3 FAQs)
+### Summary
+[2-3 sentence overall assessment of this week's ask volume and themes]
 
-Use plain language. This is customer-facing documentation.""",
-        "user": lambda squad, inputs: f"Feature to document:\n\n{inputs.get('description', '')}",
-    },
-
-    "idea": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Write a UFRF2 internal roadmap item. Use business language — no technical jargon. Descriptions must explain value to customers and the business, not implementation details.
-
-Output format:
-## Feature Title
-[Short, clear title — max 8 words]
-
-## Description
-[2–3 sentences in business language: what it does, who it's for, and why it matters. Write as if explaining to a non-technical executive.]
-
-## Business Value
-[Revenue impact, customer retention, competitive advantage, or compliance — be specific]
-
-## Target Users
-[Who benefits: which customer personas or internal teams]
-
-## Success Metrics
-[How you'd measure success: 2–3 specific metrics]
-
-Keep it concise. Unifonic targets enterprise customers in KSA and the GCC.""",
-        "user": lambda squad, inputs: f"Squad: {squad}\n\nFeature idea:\n\n{inputs.get('description', '')}",
+Be specific. Reference FCB ticket keys.""",
+        "user": lambda squad, inputs, context=None: (
+            f"Customer Askings this week:\n{context or 'No FCB items found for this period.'}"
+        ),
     },
 
     "deck": {
@@ -351,110 +1007,581 @@ Keep it concise. Unifonic targets enterprise customers in KSA and the GCC.""",
 
 Create a complete slide outline for a branded Unifonic PowerPoint presentation.
 
-For each slide use this format:
+For each slide:
 ### Slide [N]: [Title]
-**Key message:** [one sentence — the takeaway for this slide]
+**Key message:** [one sentence — the takeaway]
 **Bullets:**
-- [point]
 - [point]
 - [point]
 **Speaker notes:** [1–2 sentences for the presenter]
 
-Customer-facing decks: 8 slides, professional tone, value-focused, avoid internal jargon.
-Internal/enablement decks: 10 slides, direct tone, operational detail is fine.
-
+Customer-facing: 8 slides, professional tone, value-focused, no internal jargon.
+Internal/enablement: 10 slides, direct tone, operational detail is fine.
 End with a "Next Steps" slide.""",
-        "user": lambda squad, inputs: f"Deck topic and audience:\n\n{inputs.get('topic', '')}",
+        "user": lambda squad, inputs, context=None: (
+            f"Deck topic and audience:\n\n{inputs.get('topic', '')}"
+        ),
     },
 }
 
+
 # ---------------------------------------------------------------------------
-# Push prompts (sent to Claude CLI after user edits)
+# Jira fetch functions (for jira_fetch commands)
 # ---------------------------------------------------------------------------
 
-PUSH_PROMPTS = {
-    "story": lambda squad_name, squad_key, content: (
-        f"My squad is {squad_name} (Jira key: {squad_key}).\n\n"
-        f"The PM has reviewed and approved the following user story. "
-        f"Please create a new Jira story with this content. "
-        f"Use the text exactly as written — do not modify or reformat it.\n\n"
-        f"{content}"
-    ),
-    "doc-feature": lambda squad_name, squad_key, content: (
-        f"Please create a new Confluence page in the UPP space (Unifonic Products Playbook) "
-        f"with the following feature documentation. "
-        f"The PM has approved this content — publish it exactly as written.\n\n"
-        f"{content}"
-    ),
-    "idea": lambda squad_name, squad_key, content: (
-        f"My squad is {squad_name} (Jira key: {squad_key}).\n\n"
-        f"The PM has reviewed and approved the following roadmap item. "
-        f"Please create a new UFRF2 roadmap item. Use the Feature Title as the item name "
-        f"and the rest as the description. Do not modify the content.\n\n"
-        f"{content}"
-    ),
-    "deck": lambda squad_name, squad_key, content: (
-        f"Please create a branded Unifonic PowerPoint presentation based on the following "
-        f"approved slide outline. Use the /deck command behavior to produce the actual .pptx file.\n\n"
-        f"{content}"
-    ),
+def _squad_name(key):
+    return next((s["name"] for s in SQUADS if s["key"] == key), key or "Unknown Squad")
+
+
+def fetch_sprint_data(squad_key, form_inputs):
+    """Fetch sprint issues via JQL. Uses selected sprint_id if provided."""
+    try:
+        sprint_id = form_inputs.get("sprint_id", "").strip()
+        if sprint_id:
+            jql = f"project = {squad_key} AND sprint = {sprint_id} ORDER BY updated DESC"
+        else:
+            jql = f"project = {squad_key} AND sprint in openSprints() ORDER BY updated DESC"
+
+        data = jira_req(
+            "GET",
+            f"/search/jql?jql={urllib.parse.quote(jql)}&maxResults=100"
+            "&fields=summary,status,assignee,labels,updated,customfield_10016,customfield_10021,duedate,issuetype"
+        )
+        issues = data.get("issues", [])
+        if not issues:
+            return None, f"No issues found for the selected sprint in {squad_key}."
+
+        # Sprint name from customfield_10016 (sprint field on this instance)
+        sprint_name = "Selected Sprint"
+        for issue in issues:
+            sf = issue.get("fields", {}).get("customfield_10016")
+            if not sf:
+                continue
+            entries = sf if isinstance(sf, list) else [sf]
+            for entry in entries:
+                if isinstance(entry, dict):
+                    if not sprint_id or str(entry.get("id")) == str(sprint_id):
+                        sprint_name = entry.get("name", sprint_name)
+                        break
+                elif isinstance(entry, str):
+                    m = re.search(r"name=([^,\]]+)", entry)
+                    if m:
+                        sprint_name = m.group(1).strip()
+                        break
+            break
+
+        done = sum(
+            1 for i in issues
+            if i["fields"].get("status", {}).get("statusCategory", {}).get("key") == "done"
+        )
+        lines = [
+            f"Sprint: {sprint_name}",
+            f"Total issues: {len(issues)}",
+            f"Done: {done} / {len(issues)}",
+            "",
+        ]
+        for issue in issues:
+            f = issue.get("fields") or {}
+            status_obj = f.get("status") or {}
+            status   = status_obj.get("name", "Unknown") if isinstance(status_obj, dict) else str(status_obj)
+            assignee_obj = f.get("assignee") or {}
+            assignee = assignee_obj.get("displayName", "Unassigned") if isinstance(assignee_obj, dict) else "Unassigned"
+            points   = f.get("customfield_10021") or "?"
+            labels_raw = f.get("labels") or []
+            labels   = ", ".join(labels_raw) if isinstance(labels_raw, list) else str(labels_raw) or "—"
+            updated  = str(f.get("updated") or "")[:10]
+            lines.append(f"[{issue.get('key', '?')}] {f.get('summary', '')}")
+            lines.append(f"  Status: {status} | Assignee: {assignee} | Points: {points} | Labels: {labels} | Updated: {updated}")
+            lines.append("")
+
+        return "\n".join(lines), None
+    except RuntimeError as e:
+        return None, str(e)
+    except Exception as e:
+        return None, f"Jira API error: {e}"
+
+
+def fetch_release_tickets(squad_key, form_inputs):
+    """Fetch completed tickets for a specific sprint for release notes."""
+    try:
+        sprint_id = form_inputs.get("sprint_id", "").strip()
+        if sprint_id:
+            jql = f"project = {squad_key} AND sprint = {sprint_id} AND statusCategory = Done ORDER BY updated DESC"
+        else:
+            jql = f"project = {squad_key} AND sprint in openSprints() AND statusCategory = Done ORDER BY updated DESC"
+        data = jira_req("GET", f"/search/jql?jql={urllib.parse.quote(jql)}&maxResults=50"
+                        "&fields=summary,issuetype,labels,fixVersions,updated,customfield_10016")
+        issues = data.get("issues", [])
+        if not issues:
+            return None, f"No completed issues found for the selected sprint in {squad_key}."
+
+        # Extract sprint name from first issue that has sprint data
+        sprint_name = "Selected Sprint"
+        for issue in issues:
+            sf = issue.get("fields", {}).get("customfield_10016")
+            if sf:
+                entries = sf if isinstance(sf, list) else [sf]
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        if not sprint_id or str(entry.get("id")) == str(sprint_id):
+                            sprint_name = entry.get("name", sprint_name)
+                            break
+                break
+
+        lines = [f"Sprint: {sprint_name}", f"Completed issues for {squad_key}:", ""]
+        for issue in issues:
+            f = issue.get("fields", {})
+            itype  = f.get("issuetype", {}).get("name", "Issue")
+            labels = ", ".join(f.get("labels", [])) or "—"
+            lines.append(f"[{issue['key']}] [{itype}] {f.get('summary', '')}")
+            if labels != "—":
+                lines.append(f"  Labels: {labels}")
+        return "\n".join(lines), None
+    except RuntimeError as e:
+        return None, str(e)
+    except Exception as e:
+        return None, f"Jira API error: {e}"
+
+
+def fetch_ufrf2_item(squad_key, form_inputs):
+    """Fetch a UFRF2 roadmap item by key."""
+    issue_key = form_inputs.get("issue_key", "").strip().upper()
+    if not issue_key:
+        return None, "UFRF2 issue key is required."
+    try:
+        issue = jira_req("GET", f"/issue/{issue_key}"
+                         "?fields=summary,description,customfield_11991,status,assignee,labels")
+        f = issue.get("fields", {})
+        summary = f.get("summary", "")
+        status  = f.get("status", {}).get("name", "")
+
+        # Product area (multi-select custom field)
+        product_areas = []
+        pa_field = f.get("customfield_11991") or []
+        if isinstance(pa_field, list):
+            product_areas = [p.get("value", "") for p in pa_field if isinstance(p, dict)]
+
+        # Infer squad from product area
+        inferred_squad = ""
+        for pa in product_areas:
+            if pa in PRODUCT_AREA_TO_SQUAD:
+                inferred_squad = PRODUCT_AREA_TO_SQUAD[pa]
+                break
+
+        # Store for doc-pvg push
+        session["doc_pvg_issue_key"]    = issue_key
+        session["doc_pvg_squad_key"]    = inferred_squad or squad_key
+
+        # Description text (handle ADF or plain)
+        desc_field = f.get("description")
+        desc_text = ""
+        if isinstance(desc_field, dict):
+            # ADF — extract text nodes
+            def adf_text(node):
+                t = ""
+                if node.get("type") == "text":
+                    t += node.get("text", "")
+                for child in node.get("content", []):
+                    t += adf_text(child)
+                return t
+            desc_text = adf_text(desc_field)
+        elif isinstance(desc_field, str):
+            desc_text = desc_field
+
+        lines = [
+            f"Key: {issue_key}",
+            f"Title: {summary}",
+            f"Status: {status}",
+            f"Product Areas: {', '.join(product_areas) or '—'}",
+            f"Inferred Squad: {inferred_squad or squad_key or '—'}",
+            "",
+            "Description:",
+            desc_text or "(no description)",
+        ]
+        return "\n".join(lines), None
+    except RuntimeError as e:
+        return None, str(e)
+    except Exception as e:
+        return None, f"Jira API error fetching {issue_key}: {e}"
+
+
+def fetch_incident_ticket(squad_key, form_inputs):
+    """Fetch incident ticket details for RFO generation."""
+    ticket = form_inputs.get("ticket", "").strip().upper()
+    if not ticket:
+        return None, "Incident ticket key is required."
+    try:
+        issue = jira_req("GET", f"/issue/{ticket}"
+                         "?fields=summary,description,status,priority,labels,"
+                         "created,updated,assignee,comment,issuetype")
+        f = issue.get("fields", {})
+
+        def adf_text(node):
+            t = ""
+            if node.get("type") == "text":
+                t += node.get("text", "")
+            for child in node.get("content", []):
+                t += adf_text(child)
+            return t
+
+        desc_field = f.get("description")
+        desc_text  = adf_text(desc_field) if isinstance(desc_field, dict) else (desc_field or "")
+
+        # Recent comments
+        comments = []
+        for c in (f.get("comment") or {}).get("comments", [])[-5:]:
+            body = c.get("body", {})
+            body_text = adf_text(body) if isinstance(body, dict) else str(body)
+            author = (c.get("author") or {}).get("displayName", "Unknown")
+            created = (c.get("created") or "")[:16]
+            comments.append(f"  [{created}] {author}: {body_text[:200]}")
+
+        lines = [
+            f"Key: {ticket}",
+            f"Title: {f.get('summary', '')}",
+            f"Status: {f.get('status', {}).get('name', '')}",
+            f"Priority: {f.get('priority', {}).get('name', '')}",
+            f"Created: {(f.get('created') or '')[:16]}",
+            f"Updated: {(f.get('updated') or '')[:16]}",
+            f"Labels: {', '.join(f.get('labels', [])) or '—'}",
+            "",
+            "Description:",
+            desc_text or "(no description)",
+            "",
+            "Comments:",
+        ] + (comments if comments else ["  (none)"])
+        return "\n".join(lines), None
+    except RuntimeError as e:
+        return None, str(e)
+    except Exception as e:
+        return None, f"Jira API error fetching {ticket}: {e}"
+
+
+def fetch_fcb_items(squad_key, form_inputs):
+    """Fetch FCB Customer Asking items updated in the last 7 days."""
+    try:
+        jql = (
+            "project = FCB AND updated >= -7d "
+            "ORDER BY updated DESC"
+        )
+        data = jira_req("GET", f"/search/jql?jql={urllib.parse.quote(jql)}&maxResults=50"
+                        "&fields=summary,status,description,labels,updated,assignee,priority")
+        issues = data.get("issues", [])
+        if not issues:
+            return None, "No FCB items updated in the last 7 days."
+
+        def adf_text(node):
+            t = ""
+            if node.get("type") == "text":
+                t += node.get("text", "")
+            for child in node.get("content", []):
+                t += adf_text(child)
+            return t
+
+        lines = [f"FCB items updated in last 7 days: {len(issues)}", ""]
+        for issue in issues:
+            f = issue.get("fields", {})
+            status   = f.get("status", {}).get("name", "")
+            updated  = (f.get("updated") or "")[:10]
+            desc     = f.get("description")
+            desc_txt = (adf_text(desc) if isinstance(desc, dict) else str(desc or ""))[:200]
+            lines.append(f"[{issue['key']}] {f.get('summary', '')}")
+            lines.append(f"  Status: {status} | Updated: {updated}")
+            if desc_txt:
+                lines.append(f"  {desc_txt}")
+            lines.append("")
+        return "\n".join(lines), None
+    except RuntimeError as e:
+        return None, str(e)
+    except Exception as e:
+        return None, f"Jira API error: {e}"
+
+
+JIRA_FETCH_MAP = {
+    "daily":          (fetch_sprint_data,    "Fetching active sprint from Jira"),
+    "sprint-analysis":(fetch_sprint_data,    "Fetching sprint issues from Jira"),
+    "release-notes":  (fetch_release_tickets,"Fetching completed tickets from Jira"),
+    "doc-pvg":        (fetch_ufrf2_item,     "Fetching UFRF2 item from Jira"),
+    "rfo":            (fetch_incident_ticket,"Fetching incident ticket from Jira"),
+    "fcb-weekly":     (fetch_fcb_items,      "Fetching Customer Askings from Jira"),
 }
 
-# ---------------------------------------------------------------------------
-# Approval gate detection (for CLI commands)
-# ---------------------------------------------------------------------------
-
-APPROVAL_PATTERNS = [
-    "approve", "edit", "cancel",
-    "should i create", "should i push", "should i publish",
-    "ready to execute", "post this comment",
-    "type 'approve'", 'type "approve"',
-    "proceed?", "confirm?",
-]
-
-def contains_approval_gate(text):
-    low = text.lower()
-    return sum(1 for p in APPROVAL_PATTERNS if p in low) >= 2
 
 # ---------------------------------------------------------------------------
-# Build CLI prompt
+# Push handlers (via Jira / Confluence REST)
 # ---------------------------------------------------------------------------
 
-def build_cli_prompt(command_id, squad_key, form_inputs):
-    cmd = COMMANDS_MAP.get(command_id)
-    if not cmd:
-        return None, None
+def _push_stream(gen_fn, *args, **kwargs):
+    """Wrap a push generator in SSE format."""
+    def outer():
+        try:
+            for msg in gen_fn(*args, **kwargs):
+                yield f"data: {json.dumps({'text': msg})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'exit_code': 0})}\n\n"
+        except RuntimeError as e:
+            yield f"data: {json.dumps({'text': f'❌ {e}\n'})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'text': f'❌ Unexpected error: {e}\n'})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+    return outer
 
-    slug = cmd["slug"]
 
-    if slug.startswith("python:"):
-        return "python", slug[len("python:"):]
+_ALWAYS_SET = {"project", "summary", "description", "issuetype", "reporter", "assignee"}
 
-    parts = []
-    if cmd["needs_squad"] and squad_key:
-        squad_name = next((s["name"] for s in SQUADS if s["key"] == squad_key), squad_key)
-        parts.append(f"My squad is {squad_name} (Jira key: {squad_key}).")
 
-    parts.append(slug)
+def _createmeta(project_key, issue_type_name=None):
+    """
+    Fetch Jira create metadata using the classic endpoint (read:jira-work scope).
+    Returns the fields dict for the matched issue type, or {} on failure.
+    """
+    path = f"/issue/createmeta?projectKeys={project_key}&expand=projects.issuetypes.fields"
+    if issue_type_name:
+        path += f"&issueTypeNames={urllib.parse.quote(issue_type_name)}"
+    try:
+        meta = jira_req("GET", path)
+        projects = meta.get("projects", [])
+        if not projects:
+            return {}, []
+        issue_types = projects[0].get("issuetypes", [])
+        names = [t.get("name", "") for t in issue_types]
+        fields = issue_types[0].get("fields", {}) if issue_types else {}
+        return fields, names
+    except Exception:
+        return {}, []
 
-    for inp in cmd["inputs"]:
-        val = (form_inputs.get(inp["id"]) or "").strip()
-        if val:
-            parts.append(val)
 
-    return "claude", " ".join(parts)
+def _resolve_issuetype(squad_key, preferred="Story"):
+    """Return the best available issue type name from the project."""
+    _, names = _createmeta(squad_key)
+    name_set = set(names)
+    for candidate in (preferred, "Story", "Task", "User Story"):
+        if candidate in name_set:
+            return candidate
+    return names[0] if names else preferred
+
+
+def _fetch_create_meta(project_key, issue_type_name):
+    """Return list of required custom field descriptors for a project + issue type."""
+    fields, _ = _createmeta(project_key, issue_type_name)
+    result = []
+    for fid, f in fields.items():
+        if not f.get("required") or fid in _ALWAYS_SET:
+            continue
+        schema  = f.get("schema", {})
+        ftype   = schema.get("type", "string")
+        allowed = [
+            {"id": str(a["id"]), "value": a.get("value") or a.get("name", "")}
+            for a in f.get("allowedValues", []) if a.get("id")
+        ]
+        result.append({
+            "id":      fid,
+            "name":    f.get("name", fid),
+            "type":    ftype,
+            "allowed": allowed,
+        })
+    return result
+
+
+def _build_extra_fields(meta_fields, user_values):
+    """Convert required-field metadata + user selections into a Jira fields dict."""
+    NEUTRAL = {"none", "medium", "normal", "unassigned", "n/a", "other", "new feature"}
+    extra   = {}
+    for f in meta_fields:
+        fid     = f["id"]
+        allowed = f["allowed"]
+        uval    = user_values.get(fid, "")
+        if allowed:
+            chosen = (next((a for a in allowed if a["id"] == uval or a["value"] == uval), None)
+                      or next((a for a in allowed if a["value"].lower() in NEUTRAL), None)
+                      or allowed[0])
+            extra[fid] = {"id": chosen["id"]}
+        elif f["type"] in ("number", "float"):
+            try:
+                extra[fid] = float(uval) if uval else 0
+            except ValueError:
+                extra[fid] = 0
+        elif f["type"] == "string":
+            extra[fid] = uval or ""
+    return extra
+
+
+def _push_story(content, squad_key, inputs):
+    title       = extract_title(content, "User Story")
+    issue_type  = _resolve_issuetype(squad_key, "Story")
+    meta_fields = _fetch_create_meta(squad_key, issue_type)
+    user_vals   = inputs.get("_push_fields", {})
+    extra       = _build_extra_fields(meta_fields, user_vals)
+    yield f"Creating Jira {issue_type} in {squad_key}…\n"
+    result = jira_req("POST", "/issue", json={"fields": {
+        "project":     {"key": squad_key},
+        "summary":     title,
+        "description": markdown_to_adf(content),
+        "issuetype":   {"name": issue_type},
+        **extra,
+    }})
+    key = result.get("key", "")
+    yield f"✓ {issue_type} created: {key}\n"
+    if key:
+        yield f"{jira_url(key)}\n"
+
+
+def _push_doc_feature(content, squad_key, inputs):
+    title = extract_title(content, "Feature Documentation")
+    yield "Creating Confluence page in UPP space…\n"
+    page    = _conf_create_page(title, "UPP", markdown_to_confluence(content))
+    page_id = page.get("id", "")
+    yield f"✓ Page created: {title}\n"
+    if page_id:
+        yield f"{conf_url(page_id)}\n"
+
+
+def _push_idea(content, squad_key, inputs):
+    title       = extract_title(content, "Roadmap Item")
+    issue_type  = _resolve_issuetype("UFRF2", "Idea")
+    meta_fields = _fetch_create_meta("UFRF2", issue_type)
+    user_vals   = inputs.get("_push_fields", {})
+    extra       = _build_extra_fields(meta_fields, user_vals)
+    yield f"Creating UFRF2 roadmap item (type: {issue_type})…\n"
+    result = jira_req("POST", "/issue", json={"fields": {
+        "project":     {"key": "UFRF2"},
+        "summary":     title,
+        "description": markdown_to_adf(content),
+        "issuetype":   {"name": issue_type},
+        **extra,
+    }})
+    key = result.get("key", "")
+    yield f"✓ Roadmap item created: {key}\n"
+    if key:
+        yield f"{jira_url(key)}\n"
+
+
+def _push_release_notes(content, squad_key, inputs):
+    squad_name = _squad_name(squad_key)
+    date_label = datetime.now().strftime("%B %Y")
+    title      = f"Release Notes — {squad_name} — {date_label}"
+    yield "Publishing release notes to Confluence…\n"
+    page    = _conf_create_page(title, "UPP", markdown_to_confluence(content))
+    page_id = page.get("id", "")
+    yield f"✓ Published: {title}\n"
+    if page_id:
+        yield f"{conf_url(page_id)}\n"
+
+
+def _push_doc_pvg(content, squad_key, inputs):
+    # Squad key may have been inferred from product_area during fetch
+    effective_squad = session.get("doc_pvg_squad_key") or squad_key
+    ufrf2_key       = session.get("doc_pvg_issue_key") or inputs.get("issue_key", "")
+    squad_name      = _squad_name(effective_squad)
+    feature_title   = extract_title(content, "PVG")
+
+    yield "Creating PVG Confluence page…\n"
+    pvg_title = f"PVG — {feature_title}"
+    page      = _conf_create_page(pvg_title, "UPP", markdown_to_confluence(content))
+    page_id   = page.get("id", "")
+    page_url = conf_url(page_id)
+    yield f"✓ PVG page created: {pvg_title}\n"
+    yield f"{page_url}\n\n"
+
+    if effective_squad:
+        epic_type   = _resolve_issuetype(effective_squad, "Epic")
+        meta_fields = _fetch_create_meta(effective_squad, epic_type)
+        user_vals   = inputs.get("_push_fields", {})
+        extra       = _build_extra_fields(meta_fields, user_vals)
+        yield f"Creating {epic_type} in {squad_name} ({effective_squad})…\n"
+        epic = jira_req("POST", "/issue", json={"fields": {
+            "project":     {"key": effective_squad},
+            "summary":     feature_title,
+            "description": markdown_to_adf(f"PVG: {page_url}"),
+            "issuetype":   {"name": epic_type},
+            **extra,
+        }})
+        epic_key = epic.get("key", "")
+        yield f"✓ Epic created: {epic_key}\n"
+        yield f"{jira_url(epic_key)}\n\n"
+
+        # Link Epic to UFRF2 item
+        if ufrf2_key and epic_key:
+            yield f"Linking {ufrf2_key} → {epic_key}…\n"
+            try:
+                jira_req("POST", "/issueLink", json={
+                    "type":         {"id": "10413"},
+                    "inwardIssue":  {"key": epic_key},
+                    "outwardIssue": {"key": ufrf2_key},
+                })
+                yield f"✓ Linked\n"
+            except Exception as e:
+                yield f"⚠ Could not create Polaris link: {e}\n"
+
+        # Comment on Epic with page link
+        if epic_key and page_id:
+            try:
+                jira_req("POST", f"/issue/{epic_key}/comment", json={
+                    "body": markdown_to_adf(f"PVG published: {page_url}")
+                })
+                yield f"✓ Comment added to {epic_key} with PVG link\n"
+            except Exception:
+                pass
+    else:
+        yield "⚠ No squad determined — skipped Epic creation. Select a squad and re-push if needed.\n"
+
+
+def _push_rfo(content, squad_key, inputs):
+    ticket    = inputs.get("ticket", "").strip().upper()
+    date_label= datetime.now().strftime("%Y-%m-%d")
+    title     = f"RFO — {ticket} — {date_label}" if ticket else f"RFO — {date_label}"
+    yield "Publishing RFO to Confluence…\n"
+    page    = _conf_create_page(title, "UPP", markdown_to_confluence(content))
+    page_id = page.get("id", "")
+    yield f"✓ Published: {title}\n"
+    if page_id:
+        yield f"{conf_url(page_id)}\n"
+    if ticket and page_id:
+        try:
+            jira_req("POST", f"/issue/{ticket}/comment", json={
+                "body": markdown_to_adf(f"RFO published: {conf_url(page_id)}")
+            })
+            yield f"✓ Comment added to {ticket}\n"
+        except Exception:
+            pass
+
+
+def _push_deck(content, squad_key, inputs):
+    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"deck_{ts}.md"
+    path     = OUTPUTS_DIR / filename
+    path.write_text(content, encoding="utf-8")
+    yield f"✓ Deck outline saved to outputs/{filename}\n"
+    yield f"Download via the link that will appear below.\n"
+
+
+PUSH_HANDLERS = {
+    "story":         _push_story,
+    "doc-feature":   _push_doc_feature,
+    "idea":          _push_idea,
+    "release-notes": _push_release_notes,
+    "doc-pvg":       _push_doc_pvg,
+    "rfo":           _push_rfo,
+    "deck":          _push_deck,
+}
+
 
 # ---------------------------------------------------------------------------
-# Subprocess helpers
+# Subprocess helper (Python scripts only — market intel)
 # ---------------------------------------------------------------------------
+
+def launch_python(script_name):
+    return subprocess.Popen(
+        [sys.executable, script_name],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        cwd=str(PROJECT_ROOT), text=True,
+        bufsize=1, encoding="utf-8", errors="replace",
+    )
 
 def stream_process(proc):
-    approval_buffer = ""
     try:
         for line in iter(proc.stdout.readline, ""):
-            approval_buffer += line
-            approval_hit = contains_approval_gate(approval_buffer[-800:])
-            yield f"data: {json.dumps({'text': line, 'approval': approval_hit})}\n\n"
+            yield f"data: {json.dumps({'text': line, 'approval': False})}\n\n"
         proc.stdout.close()
     except Exception as e:
         yield f"data: {json.dumps({'text': f'[stream error: {e}]\n', 'approval': False})}\n\n"
@@ -463,46 +1590,96 @@ def stream_process(proc):
         yield f"data: {json.dumps({'done': True, 'exit_code': proc.returncode})}\n\n"
 
 
-def launch_claude(prompt, extra_flags=None):
-    if not CLAUDE_BIN:
-        raise RuntimeError(
-            "Claude CLI not found. Set the CLAUDE_BIN environment variable to the full path of your claude executable."
-        )
-    cmd = [CLAUDE_BIN, "-p", prompt]
-    if extra_flags:
-        cmd = [CLAUDE_BIN] + extra_flags + ["-p", prompt]
-    return subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        cwd=str(PROJECT_ROOT),
-        text=True,
-        bufsize=1,
-        encoding="utf-8",
-        errors="replace",
-        shell=is_cmd_file(CLAUDE_BIN),
-    )
+# ---------------------------------------------------------------------------
+# OAuth routes
+# ---------------------------------------------------------------------------
+
+@app.route("/oauth/login")
+def oauth_login():
+    state = secrets.token_hex(16)
+    session["oauth_state"] = state
+    params = {
+        "audience":      "api.atlassian.com",
+        "client_id":     ATLASSIAN_CLIENT_ID,
+        "scope":         ATLASSIAN_SCOPES,
+        "redirect_uri":  ATLASSIAN_REDIRECT_URI,
+        "state":         state,
+        "response_type": "code",
+        "prompt":        "consent",
+    }
+    return redirect(f"{_ATLASSIAN_AUTH_URL}?{urllib.parse.urlencode(params)}")
 
 
-def launch_python(script_name):
-    return subprocess.Popen(
-        [sys.executable, script_name],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        cwd=str(PROJECT_ROOT),
-        text=True,
-        bufsize=1,
-        encoding="utf-8",
-        errors="replace",
-    )
+@app.route("/oauth/callback")
+def oauth_callback():
+    error = request.args.get("error")
+    if error:
+        return redirect(f"/?auth_error={urllib.parse.quote(error)}")
+
+    code  = request.args.get("code", "")
+    state = request.args.get("state", "")
+
+    if state != session.get("oauth_state"):
+        return redirect("/?auth_error=state_mismatch")
+
+    try:
+        r = http.post(_ATLASSIAN_TOKEN_URL, json={
+            "grant_type":    "authorization_code",
+            "client_id":     ATLASSIAN_CLIENT_ID,
+            "client_secret": ATLASSIAN_CLIENT_SECRET,
+            "code":          code,
+            "redirect_uri":  ATLASSIAN_REDIRECT_URI,
+        }, timeout=15)
+        if not r.ok:
+            return redirect(f"/?auth_error=token_exchange_failed")
+        tokens = r.json()
+        tokens["expires_at"] = time.time() + tokens.get("expires_in", 3600) - 60
+        save_tokens(tokens)
+        get_cloud_info()  # cache cloud_id immediately
+    except Exception as e:
+        return redirect(f"/?auth_error={urllib.parse.quote(str(e)[:60])}")
+
+    return redirect("/")
+
+
+@app.route("/oauth/logout")
+def oauth_logout():
+    clear_tokens()
+    return redirect("/")
+
 
 # ---------------------------------------------------------------------------
-# Routes
+# API routes
 # ---------------------------------------------------------------------------
 
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/auth/status")
+def api_auth_status():
+    tokens = load_tokens()
+    if not tokens:
+        return jsonify({"connected": False})
+    token = get_valid_token()
+    if not token:
+        return jsonify({"connected": False})
+    try:
+        r = http.get("https://api.atlassian.com/me",
+                     headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        user = r.json() if r.ok else {}
+        return jsonify({
+            "connected": True,
+            "user": {
+                "name":    user.get("name") or user.get("displayName", "Connected"),
+                "email":   user.get("email", ""),
+                "picture": user.get("picture", ""),
+            },
+            "cloud_url": tokens.get("cloud_url", ""),
+        })
+    except Exception:
+        return jsonify({"connected": True, "user": {"name": "Connected"}})
 
 
 @app.route("/api/squads")
@@ -519,66 +1696,146 @@ def api_select_squad():
 
 @app.route("/api/commands")
 def api_commands():
-    # Include mode + push_label so the frontend knows how to handle each command
-    enriched = []
-    for c in COMMANDS:
-        item = dict(c)
-        item["push_label"] = PUSH_LABELS.get(c["id"], "")
-        enriched.append(item)
-    return jsonify({"commands": enriched})
+    return jsonify({"commands": COMMANDS})
+
+
+@app.route("/api/push-fields/<command_id>/<squad_key>")
+def api_push_fields(command_id, squad_key):
+    """Return required Jira fields (with allowed values) for a push action."""
+    COMMAND_ISSUE_MAP = {
+        "story":   (squad_key, "Story"),
+        "idea":    ("UFRF2",   "Idea"),
+        "doc-pvg": (squad_key, "Epic"),
+    }
+    if command_id not in COMMAND_ISSUE_MAP:
+        return jsonify({"fields": []})
+    try:
+        project, preferred = COMMAND_ISSUE_MAP[command_id]
+        issue_type = _resolve_issuetype(project, preferred)
+        fields     = _fetch_create_meta(project, issue_type)
+        return jsonify({"fields": fields, "issue_type": issue_type})
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/sprints/<squad_key>")
+def api_sprints(squad_key):
+    """Return list of sprints for a squad, extracted from the sprint custom field."""
+    try:
+        jql = f"project = {squad_key} ORDER BY updated DESC"
+        data = jira_req(
+            "GET",
+            f"/search/jql?jql={urllib.parse.quote(jql)}&maxResults=200"
+            "&fields=customfield_10016"
+        )
+        issues = data.get("issues", [])
+
+        seen   = {}  # sprint_id → sprint dict
+        for issue in issues:
+            sf = issue.get("fields", {}).get("customfield_10016")
+            if not sf:
+                continue
+            entries = sf if isinstance(sf, list) else [sf]
+            for entry in entries:
+                if isinstance(entry, dict):
+                    sid   = entry.get("id")
+                    name  = entry.get("name", "")
+                    state = entry.get("state", "").lower()
+                elif isinstance(entry, str):
+                    sid_m   = re.search(r"id=(\d+)",       entry)
+                    name_m  = re.search(r"name=([^,\]]+)", entry)
+                    state_m = re.search(r"state=([^,\]]+)",entry)
+                    sid   = int(sid_m.group(1))  if sid_m   else None
+                    name  = name_m.group(1).strip()  if name_m  else ""
+                    state = state_m.group(1).strip().lower() if state_m else ""
+                else:
+                    continue
+                if sid and sid not in seen:
+                    seen[sid] = {"id": sid, "name": name, "state": state}
+
+        # Sort: active first, then closed by id descending
+        def sort_key(s):
+            order = {"active": 0, "future": 1, "closed": 2}
+            return (order.get(s["state"], 3), -s["id"])
+
+        sprints = sorted(seen.values(), key=sort_key)
+        return jsonify({"sprints": sprints})
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/status")
 def api_status():
-    status = {
-        "cli_ok": False, "cli_version": "", "cli_reason": "",
-        "haiku_ok": anthropic_client is not None,
+    return jsonify({
+        "haiku_ok":     anthropic_client is not None,
         "haiku_reason": "" if anthropic_client else "ANTHROPIC_API_KEY not set in .env",
-    }
-    if not CLAUDE_BIN:
-        status["cli_reason"] = "Claude CLI not found."
-        return jsonify(status)
-    try:
-        result = subprocess.run(
-            [CLAUDE_BIN, "--version"],
-            capture_output=True, text=True, timeout=8,
-            cwd=str(PROJECT_ROOT),
-            shell=is_cmd_file(CLAUDE_BIN),
-        )
-        status["cli_ok"] = result.returncode == 0
-        status["cli_version"] = result.stdout.strip()
-        status["cli_reason"] = result.stderr.strip() if not status["cli_ok"] else ""
-    except Exception as e:
-        status["cli_reason"] = str(e)
-    return jsonify(status)
+        "jira_ok":      get_valid_token() is not None,
+        "jira_reason":  "" if get_valid_token() else "Not connected — click Connect to Jira",
+    })
 
 
-# ── Generate with Haiku ────────────────────────────────────────────────────
+# ── Generate (Haiku, optionally after Jira fetch) ─────────────────────────
 
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
     if not anthropic_client:
-        return jsonify({"error": "ANTHROPIC_API_KEY not set in .env file"}), 503
+        return jsonify({"error": "ANTHROPIC_API_KEY not set in .env"}), 503
 
-    data = request.json or {}
-    command_id = data.get("command_id", "")
-    squad_key  = data.get("squad", session.get("squad", ""))
+    data        = request.json or {}
+    command_id  = data.get("command_id", "")
+    squad_key   = data.get("squad", session.get("squad", ""))
     form_inputs = data.get("inputs", {})
 
+    cmd        = COMMANDS_MAP.get(command_id)
     prompt_cfg = HAIKU_PROMPTS.get(command_id)
-    if not prompt_cfg:
-        return jsonify({"error": f"No Haiku prompt for command: {command_id}"}), 400
+    if not cmd or not prompt_cfg:
+        return jsonify({"error": f"Unknown command: {command_id}"}), 400
 
-    squad_name = next((s["name"] for s in SQUADS if s["key"] == squad_key), squad_key or "")
+    squad_name  = _squad_name(squad_key)
     squad_label = f"{squad_name} ({squad_key})" if squad_key else "No squad selected"
 
-    user_msg = prompt_cfg["user"](squad_label, form_inputs)
-
     def generate():
+        context = None
+
+        # Step 1: Jira fetch (if needed)
+        if cmd.get("jira_fetch"):
+            if not get_valid_token():
+                yield f"data: {json.dumps({'text': '❌ Not connected to Atlassian. Click Connect to Jira in the header.\n'})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+                return
+
+            fetch_fn, fetch_msg = JIRA_FETCH_MAP[command_id]
+            yield f"data: {json.dumps({'text': f'⏳ {fetch_msg}…\n', 'progress': True})}\n\n"
+
+            try:
+                context, error = fetch_fn(squad_key, form_inputs)
+                if error:
+                    yield f"data: {json.dumps({'text': f'❌ {error}\n'})}\n\n"
+                    yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+                    return
+                lines = [l for l in context.split("\n") if l.strip()][:3]
+                yield f"data: {json.dumps({'text': f'✓ Fetched. Generating with AI…\n\n', 'progress': True})}\n\n"
+                # Signal: frontend resets rawOutput here so Jira progress isn't in edit textarea
+                yield f"data: {json.dumps({'jira_done': True})}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'text': f'❌ Jira error: {e}\n'})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+                return
+
+        # Step 2: Build user message
+        user_fn  = prompt_cfg["user"]
+        user_msg = user_fn(squad_label, form_inputs, context)
+
+        # Step 3: Stream Haiku
+        max_tokens = COMMAND_MAX_TOKENS.get(command_id, 4096)
         try:
             with anthropic_client.messages.stream(
                 model=HAIKU_MODEL,
-                max_tokens=2048,
+                max_tokens=max_tokens,
                 system=prompt_cfg["system"],
                 messages=[{"role": "user", "content": user_msg}],
             ) as stream:
@@ -586,100 +1843,119 @@ def api_generate():
                     yield f"data: {json.dumps({'text': text, 'approval': False})}\n\n"
             yield f"data: {json.dumps({'done': True, 'exit_code': 0})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'text': f'[Haiku error: {e}]\n', 'approval': False})}\n\n"
+            yield f"data: {json.dumps({'text': f'[Haiku error: {e}]\n'})}\n\n"
             yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
 
-    return Response(
-        stream_with_context(generate()),
-        content_type="text/event-stream",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
-    )
+    return Response(stream_with_context(generate()),
+                    content_type="text/event-stream",
+                    headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
 
-# ── Push edited content via Claude CLI ────────────────────────────────────
+# ── Push (Jira / Confluence REST) ─────────────────────────────────────────
 
 @app.route("/api/push", methods=["POST"])
 def api_push():
-    data = request.json or {}
+    data       = request.json or {}
     command_id = data.get("command_id", "")
     squad_key  = data.get("squad", session.get("squad", ""))
     content    = data.get("content", "").strip()
+    inputs     = dict(data.get("inputs", {}))
+    inputs["_push_fields"] = data.get("push_fields", {})
 
     if not content:
         return jsonify({"error": "No content to push"}), 400
 
-    push_fn = PUSH_PROMPTS.get(command_id)
-    if not push_fn:
-        return jsonify({"error": f"No push action for command: {command_id}"}), 400
+    handler = PUSH_HANDLERS.get(command_id)
+    if not handler:
+        return jsonify({"error": f"No push handler for: {command_id}"}), 400
 
-    squad_name = next((s["name"] for s in SQUADS if s["key"] == squad_key), squad_key or "")
-    prompt = push_fn(squad_name, squad_key, content)
-
-    def generate():
-        try:
-            proc = launch_claude(prompt)
-            yield from stream_process(proc)
-        except RuntimeError as e:
-            yield f"data: {json.dumps({'text': str(e) + '\n', 'approval': False})}\n\n"
+    if not get_valid_token():
+        def no_auth():
+            yield f"data: {json.dumps({'text': '❌ Not connected to Atlassian. Click Connect to Jira.\n'})}\n\n"
             yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+        return Response(stream_with_context(no_auth()),
+                        content_type="text/event-stream",
+                        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
-    return Response(
-        stream_with_context(generate()),
-        content_type="text/event-stream",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
-    )
+    gen = _push_stream(handler, content, squad_key, inputs)()
+    return Response(stream_with_context(gen),
+                    content_type="text/event-stream",
+                    headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
 
-# ── Run CLI command directly ───────────────────────────────────────────────
+# ── Run (comment → direct Jira action, or Python scripts) ────────────────
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
-    data = request.json or {}
+    data        = request.json or {}
     command_id  = data.get("command_id", "")
     squad_key   = data.get("squad", session.get("squad", ""))
     form_inputs = data.get("inputs", {})
 
-    kind, value = build_cli_prompt(command_id, squad_key, form_inputs)
-    if kind is None:
+    cmd = COMMANDS_MAP.get(command_id)
+    if not cmd:
         return jsonify({"error": f"Unknown command: {command_id}"}), 400
 
-    def generate():
-        try:
-            proc = launch_python(value) if kind == "python" else launch_claude(value)
-            yield from stream_process(proc)
-        except RuntimeError as e:
-            yield f"data: {json.dumps({'text': str(e) + '\n', 'approval': False})}\n\n"
-            yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+    # Python script
+    if cmd["mode"] == "python":
+        script = cmd["slug"].replace("python:", "")
+        def py_gen():
+            try:
+                proc = launch_python(script)
+                yield from stream_process(proc)
+            except Exception as e:
+                yield f"data: {json.dumps({'text': f'Error: {e}\n'})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+        return Response(stream_with_context(py_gen()),
+                        content_type="text/event-stream",
+                        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
-    return Response(
-        stream_with_context(generate()),
-        content_type="text/event-stream",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
-    )
+    # Comment → direct Jira action
+    if command_id == "comment":
+        issue_key    = form_inputs.get("issue_key", "").strip().upper()
+        comment_text = form_inputs.get("comment_text", "").strip()
+        mentions_str = form_inputs.get("mentions", "").strip()
 
+        def comment_gen():
+            if not get_valid_token():
+                yield f"data: {json.dumps({'text': '❌ Not connected to Atlassian. Click Connect to Jira.\n'})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+                return
 
-# ── Continue conversation ──────────────────────────────────────────────────
+            mention_ids = {}
+            if mentions_str:
+                yield f"data: {json.dumps({'text': 'Resolving user mentions…\n'})}\n\n"
+                for name in [m.strip() for m in mentions_str.split(",") if m.strip()]:
+                    try:
+                        results = jira_req("GET", f"/user/search?query={urllib.parse.quote(name)}&maxResults=3")
+                        if results:
+                            mention_ids[name] = results[0]["accountId"]
+                            dn = results[0].get("displayName", name)
+                            yield f"data: {json.dumps({'text': f'  ✓ {name} → {dn}\n'})}\n\n"
+                        else:
+                            yield f"data: {json.dumps({'text': f'  ⚠ Could not resolve: {name}\n'})}\n\n"
+                    except Exception as e:
+                        yield f"data: {json.dumps({'text': f'  ⚠ Error resolving {name}: {e}\n'})}\n\n"
 
-@app.route("/api/continue", methods=["POST"])
-def api_continue():
-    data = request.json or {}
-    response_text = data.get("text", "").strip()
-    if not response_text:
-        return jsonify({"error": "Empty response"}), 400
+            yield f"data: {json.dumps({'text': f'Posting comment to {issue_key}…\n'})}\n\n"
+            try:
+                jira_req("POST", f"/issue/{issue_key}/comment", json={
+                    "body": build_adf_comment(comment_text, mention_ids)
+                })
+                yield f"data: {json.dumps({'text': f'✓ Comment posted to {jira_url(issue_key)}\n'})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'exit_code': 0})}\n\n"
+            except RuntimeError as e:
+                yield f"data: {json.dumps({'text': f'❌ {e}\n'})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'text': f'❌ Error: {e}\n'})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
 
-    def generate():
-        try:
-            proc = launch_claude(response_text, extra_flags=["--continue"])
-            yield from stream_process(proc)
-        except RuntimeError as e:
-            yield f"data: {json.dumps({'text': str(e) + '\n', 'approval': False})}\n\n"
-            yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
+        return Response(stream_with_context(comment_gen()),
+                        content_type="text/event-stream",
+                        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
-    return Response(
-        stream_with_context(generate()),
-        content_type="text/event-stream",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
-    )
+    return jsonify({"error": f"No run handler for: {command_id}"}), 400
 
 
 # ── File downloads ─────────────────────────────────────────────────────────
@@ -703,10 +1979,12 @@ def api_download(filename):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("=" * 55)
-    print("  AI PM Assistant  —  http://localhost:5000")
-    print("=" * 55)
-    print(f"  Claude CLI : {CLAUDE_BIN or 'NOT FOUND'}")
-    print(f"  Haiku (API): {'ready' if anthropic_client else 'no API key — set ANTHROPIC_API_KEY in .env'}")
-    print("=" * 55)
-    app.run(debug=False, host="127.0.0.1", port=5000, threaded=True)
+    port = int(os.environ.get("PORT", 5001))
+    print("=" * 60)
+    print(f"  AI PM Assistant  —  http://localhost:{port}")
+    print("=" * 60)
+    print(f"  Haiku (API): {'ready' if anthropic_client else 'no ANTHROPIC_API_KEY in .env'}")
+    print(f"  Jira (OAuth): {'connected' if load_tokens() else 'not connected — open UI to connect'}")
+    print(f"  OAuth callback: {ATLASSIAN_REDIRECT_URI}")
+    print("=" * 60)
+    app.run(debug=False, host="127.0.0.1", port=port, threaded=True)

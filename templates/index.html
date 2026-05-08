@@ -13,6 +13,7 @@
 <!-- ═══ STATUS BANNER ═══════════════════════════════════════════════════ -->
 <div id="auth-banner" class="status-banner hidden">
   <span id="auth-banner-msg"></span>
+  <button class="status-banner-close" onclick="document.getElementById('auth-banner').classList.add('hidden');document.body.classList.remove('has-banner')">✕</button>
 </div>
 
 <!-- ═══ HEADER ══════════════════════════════════════════════════════════ -->
@@ -25,14 +26,15 @@
     <span class="header-tagline">Unifonic Product Ops</span>
   </div>
   <div class="header-right">
-    <div class="engine-pills" id="engine-pills">
+    <div class="engine-pills">
       <span class="pill pill-haiku" title="Generation commands use Haiku">⚡ Haiku</span>
-      <span class="pill pill-cli"   title="Analysis commands use Claude CLI">🔗 Claude CLI</span>
+      <span class="pill pill-jira"  title="Jira/Confluence connected via OAuth">🔗 Jira</span>
     </div>
     <label class="squad-label" for="squad-select">Squad</label>
     <select id="squad-select" class="squad-select">
       <option value="">— Select squad —</option>
     </select>
+    <button id="shortcuts-btn" class="shortcuts-btn" title="Keyboard shortcuts (?)">?</button>
   </div>
 </header>
 
@@ -41,8 +43,28 @@
 
   <!-- ── SIDEBAR ────────────────────────────────────────────────────── -->
   <aside class="sidebar">
-    <nav id="command-nav" class="command-nav"></nav>
 
+    <!-- Search -->
+    <div class="sidebar-search-wrap">
+      <input id="cmd-search" type="search" class="cmd-search"
+             placeholder="Search commands… (Ctrl+K)" autocomplete="off" />
+    </div>
+
+    <!-- Command list -->
+    <nav id="command-nav" class="command-nav"></nav>
+    <div id="search-empty" class="search-empty hidden">No commands match</div>
+
+    <!-- History -->
+    <div id="history-panel" class="history-panel hidden">
+      <button class="history-header" id="history-toggle">
+        <span>Recent runs</span>
+        <span id="history-count" class="history-count"></span>
+        <span id="history-chevron" class="history-chevron">▾</span>
+      </button>
+      <div id="history-list" class="history-list"></div>
+    </div>
+
+    <!-- Input panel -->
     <div class="input-panel">
       <div id="command-title" class="command-title">Select a command</div>
       <div id="command-desc" class="command-desc"></div>
@@ -61,7 +83,6 @@
   <!-- ── MAIN ───────────────────────────────────────────────────────── -->
   <main class="main-panel">
 
-    <!-- Output header -->
     <div class="output-header">
       <div class="output-header-left">
         <span id="output-label" class="output-label">Output</span>
@@ -69,8 +90,8 @@
       </div>
       <div class="output-actions">
         <span id="status-indicator" class="status-indicator"></span>
-        <button id="regenerate-btn" class="icon-btn hidden" title="Generate again">↺ Regenerate</button>
-        <button id="copy-btn" class="icon-btn hidden" title="Copy">
+        <button id="regenerate-btn" class="icon-btn hidden">↺ Regenerate</button>
+        <button id="copy-btn" class="icon-btn hidden">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="9" y="9" width="13" height="13" rx="2"/>
             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
@@ -80,7 +101,6 @@
       </div>
     </div>
 
-    <!-- Phase 1: Streaming output (live + rendered) -->
     <div id="output-panel" class="output-panel">
       <div class="empty-state">
         <div class="empty-icon">⚡</div>
@@ -89,12 +109,9 @@
       </div>
     </div>
 
-    <!-- Phase 2: Edit panel (generation commands only) -->
     <div id="edit-panel" class="edit-panel hidden">
       <div class="edit-header">
-        <span class="edit-header-title">
-          ✏️ Review &amp; edit before pushing
-        </span>
+        <span class="edit-header-title">✏️ Review &amp; edit before pushing</span>
         <span class="edit-header-note">Changes you make here are what gets sent to Jira / Confluence.</span>
       </div>
       <textarea id="edit-textarea" class="edit-textarea" spellcheck="true"></textarea>
@@ -103,11 +120,10 @@
           <span id="push-btn-label">Push to Jira</span>
           <span class="push-arrow">→</span>
         </button>
-        <span class="edit-hint" id="edit-hint">brainstorm results are read-only — no push needed</span>
+        <span class="edit-hint" id="edit-hint"></span>
       </div>
     </div>
 
-    <!-- Phase 3: Push result -->
     <div id="push-panel" class="push-panel hidden">
       <div class="push-panel-header">
         <span id="push-label-display"></span>
@@ -116,7 +132,6 @@
       <div id="push-output" class="push-output"></div>
     </div>
 
-    <!-- Continue bar (CLI approval gates) -->
     <div id="continue-bar" class="continue-bar hidden">
       <div class="continue-label">
         <span class="pulse-dot"></span>
@@ -124,7 +139,7 @@
       </div>
       <div class="continue-input-row">
         <input id="continue-input" type="text" class="continue-input"
-               placeholder='Type "approve", "cancel", or any follow-up...' />
+               placeholder='Type "approve", "cancel", or any follow-up…' />
         <button id="continue-btn" class="continue-btn">Continue</button>
       </div>
       <div class="continue-quick-btns">
@@ -136,6 +151,22 @@
     </div>
 
   </main>
+</div>
+
+<!-- ═══ SHORTCUTS MODAL ══════════════════════════════════════════════════ -->
+<div id="shortcuts-modal" class="shortcuts-modal hidden">
+  <div class="shortcuts-dialog">
+    <div class="shortcuts-dialog-header">
+      <span class="shortcuts-title">Keyboard Shortcuts</span>
+      <button id="shortcuts-close" class="shortcuts-close">✕</button>
+    </div>
+    <table class="shortcuts-table">
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td>Run / Generate command</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd> or <kbd>/</kbd></td><td>Focus command search</td></tr>
+      <tr><td><kbd>Escape</kbd></td><td>Clear output &amp; reset / close modal</td></tr>
+      <tr><td><kbd>?</kbd></td><td>Show this shortcuts panel</td></tr>
+    </table>
+  </div>
 </div>
 
 <script src="/static/app.js"></script>
