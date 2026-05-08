@@ -1,0 +1,6 @@
+# Copy this file to manifest.yml and update keys.
+# Keys are what PMs can reference in /deck prompts.
+
+hero_positioning: positioning-hero.png
+agentic_equation: agentic-equation-diagram.png
+rfm_kpi_card: rfm-kpi-card.png

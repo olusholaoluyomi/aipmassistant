@@ -1,0 +1,26 @@
+# Deck Image Asset Manifest
+# Reference these keys in /deck prompts instead of full filenames.
+# Example: /deck customer RFM — images: saudi_persona_icons, product_mcc
+
+# --- Brand ---
+logo:                  "Unifonic logo.jpg"
+unifonic_figure:       A3.png          # Unifonic brand figure/illustration
+
+# --- Saudi Persona Accents ---
+# Lifestyle images of Saudi people using communication tools.
+# Use for hero slides, context slides, or regional market slides.
+
+saudi_persona_icons:   SA.png          # Saudi man with conversation/channel icons around him
+saudi_persona_2:       SA2.png         # Saudi persona variant 2
+saudi_persona_phone:   sa12.png        # Saudi person with phone
+saudi_persona_sit_1:   sa31.png        # Saudi person seated, variant 1
+saudi_persona_sit_2:   Sa32.png        # Saudi person seated, variant 2
+saudi_persona_stand:   sa40.png        # Saudi person standing
+saudi_persona_notebook: Picture1.png   # Saudi man writing in a notebook
+
+# --- Product Screenshots / Illustrations ---
+product_mcc:           mcc.png         # MCC (Marketing Campaign Cloud)
+product_flow_studio:   FS.png          # Flow Studio
+product_chatbot:       bot.png         # Chatbot Builder
+product_agent_console: ac.png          # Agent Console
+product_auth:          auth.png        # Authentication / security visual

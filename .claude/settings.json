@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "mcp__b651a694-b0ec-4add-a9e3-8f3fdcfe8df2__*",
+      "mcp__claude_ai_Atlassian__*",
+      "mcp__claude_ai_Gamma__*",
+      "mcp__claude_ai_Gmail__*",
+      "mcp__claude_ai_Google_Calendar__*",
+      "mcp__claude_ai_Google_Drive__*",
+      "mcp__claude_ai_Microsoft_365__*",
+      "mcp__ccd_session__*",
+      "mcp__scheduled-tasks__*"
+    ]
+  },
+  "enableAllProjectMcpServers": true
+}
