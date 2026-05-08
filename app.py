@@ -567,9 +567,9 @@ COMMANDS = [
         "id": "release-notes", "name": "Release Notes", "category": "Content",
         "mode": "generate", "jira_fetch": True, "slug": "/release-notes",
         "needs_squad": True, "push_label": "Publish Release Notes",
-        "description": "Select a sprint → fetch Done tickets → AI writes release notes → publish to Confluence",
+        "description": "Select a Fix Version (release) → fetch Done tickets → AI writes release notes → publish to Confluence",
         "inputs": [
-            {"id": "sprint_id", "label": "Sprint", "type": "sprint-select",
+            {"id": "fix_version", "label": "Release (Fix Version)", "type": "fix-version-select",
              "required": True, "placeholder": "Select a squad first…"},
         ],
     },
@@ -1102,33 +1102,19 @@ def fetch_sprint_data(squad_key, form_inputs):
 
 
 def fetch_release_tickets(squad_key, form_inputs):
-    """Fetch completed tickets for a specific sprint for release notes."""
+    """Fetch completed tickets for a Fix Version (release) for release notes."""
     try:
-        sprint_id = form_inputs.get("sprint_id", "").strip()
-        if sprint_id:
-            jql = f"project = {squad_key} AND sprint = {sprint_id} AND statusCategory = Done ORDER BY updated DESC"
-        else:
-            jql = f"project = {squad_key} AND sprint in openSprints() AND statusCategory = Done ORDER BY updated DESC"
-        data = jira_req("GET", f"/search/jql?jql={urllib.parse.quote(jql)}&maxResults=50"
-                        "&fields=summary,issuetype,labels,fixVersions,updated,customfield_10016")
+        fix_version = form_inputs.get("fix_version", "").strip()
+        if not fix_version:
+            return None, "No Fix Version selected. Please select a release from the dropdown."
+        jql = f'project = {squad_key} AND fixVersion = "{fix_version}" AND statusCategory = Done ORDER BY updated DESC'
+        data = jira_req("GET", f"/search/jql?jql={urllib.parse.quote(jql)}&maxResults=100"
+                        "&fields=summary,issuetype,labels,fixVersions,updated")
         issues = data.get("issues", [])
         if not issues:
-            return None, f"No completed issues found for the selected sprint in {squad_key}."
+            return None, f"No completed issues found for release '{fix_version}' in {squad_key}."
 
-        # Extract sprint name from first issue that has sprint data
-        sprint_name = "Selected Sprint"
-        for issue in issues:
-            sf = issue.get("fields", {}).get("customfield_10016")
-            if sf:
-                entries = sf if isinstance(sf, list) else [sf]
-                for entry in entries:
-                    if isinstance(entry, dict):
-                        if not sprint_id or str(entry.get("id")) == str(sprint_id):
-                            sprint_name = entry.get("name", sprint_name)
-                            break
-                break
-
-        lines = [f"Sprint: {sprint_name}", f"Completed issues for {squad_key}:", ""]
+        lines = [f"Release: {fix_version}", f"Project: {squad_key}", ""]
         for issue in issues:
             f = issue.get("fields", {})
             itype  = f.get("issuetype", {}).get("name", "Issue")
@@ -1762,6 +1748,31 @@ def api_sprints(squad_key):
 
         sprints = sorted(seen.values(), key=sort_key)
         return jsonify({"sprints": sprints})
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/fix-versions/<squad_key>")
+def api_fix_versions(squad_key):
+    """Return Fix Versions (releases) for a project, unreleased first."""
+    try:
+        data = jira_req("GET", f"/project/{squad_key}/versions")
+        versions = []
+        for v in data:
+            if v.get("archived"):
+                continue
+            versions.append({
+                "id":       v.get("id", ""),
+                "name":     v.get("name", ""),
+                "released": v.get("released", False),
+                "releaseDate": v.get("releaseDate", ""),
+            })
+        # Sort: unreleased first, then released by releaseDate descending
+        versions.sort(key=lambda v: (1 if v["released"] else 0, v["releaseDate"]), reverse=False)
+        versions.sort(key=lambda v: (v["released"], v["releaseDate"]))
+        return jsonify({"versions": versions})
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 401
     except Exception as e:

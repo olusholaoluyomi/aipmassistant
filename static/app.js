@@ -183,9 +183,12 @@ squadSelect.addEventListener("change", async () => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ key: state.currentSquad }),
   });
-  // Refresh any sprint-select dropdowns for the newly selected squad
+  // Refresh any sprint-select or fix-version-select dropdowns for the newly selected squad
   document.querySelectorAll(".field-sprint-select").forEach(el => {
     loadSprintOptions(el, state.currentSquad);
+  });
+  document.querySelectorAll(".field-fix-version-select").forEach(el => {
+    loadFixVersionOptions(el, state.currentSquad);
   });
   if (state.activeCommand) validateRunBtn();
 });
@@ -213,6 +216,37 @@ async function loadSprintOptions(selectEl, squadKey) {
         return `<option value="${s.id}">${label}</option>`;
       });
       selectEl.innerHTML = '<option value="">— Pick a sprint —</option>' + opts.join("");
+    }
+  } catch (err) {
+    selectEl.innerHTML = `<option value="">⚠ ${err.message}</option>`;
+  }
+  selectEl.disabled = false;
+  validateRunBtn();
+}
+
+// ── Fix Version loader ─────────────────────────────────────────────────────
+async function loadFixVersionOptions(selectEl, squadKey) {
+  if (!squadKey) {
+    selectEl.innerHTML = '<option value="">— Select a squad first —</option>';
+    validateRunBtn();
+    return;
+  }
+  selectEl.innerHTML = '<option value="">Loading releases…</option>';
+  selectEl.disabled  = true;
+  try {
+    const res  = await fetch(`/api/fix-versions/${squadKey}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    const versions = data.versions || [];
+    if (!versions.length) {
+      selectEl.innerHTML = '<option value="">No releases found</option>';
+    } else {
+      const opts = versions.map(v => {
+        const label = v.released ? `✓ ${v.name}` : `⬡ ${v.name}`;
+        return `<option value="${v.name}">${label}</option>`;
+      });
+      selectEl.innerHTML = '<option value="">— Pick a release —</option>' + opts.join("");
     }
   } catch (err) {
     selectEl.innerHTML = `<option value="">⚠ ${err.message}</option>`;
@@ -355,13 +389,18 @@ function buildInputFields(cmd) {
       el.className = "field-input field-sprint-select";
       el.innerHTML = `<option value="">— ${inp.placeholder || "Select a squad first…"} —</option>`;
       if (state.currentSquad) loadSprintOptions(el, state.currentSquad);
+    } else if (inp.type === "fix-version-select") {
+      el = document.createElement("select");
+      el.className = "field-input field-fix-version-select";
+      el.innerHTML = `<option value="">— ${inp.placeholder || "Select a squad first…"} —</option>`;
+      if (state.currentSquad) loadFixVersionOptions(el, state.currentSquad);
     } else {
       el = document.createElement("input");
       el.type = "text";
       el.className = "field-input";
     }
     el.id          = `field-${inp.id}`;
-    if (inp.type !== "sprint-select") el.placeholder = inp.placeholder || "";
+    if (inp.type !== "sprint-select" && inp.type !== "fix-version-select") el.placeholder = inp.placeholder || "";
     el.addEventListener("change", () => { validateField(inp, el); validateRunBtn(); });
     el.addEventListener("input",  () => { validateField(inp, el); validateRunBtn(); });
     wrap.appendChild(el);
