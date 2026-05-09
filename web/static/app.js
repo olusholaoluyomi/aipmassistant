@@ -148,28 +148,83 @@ const COMMANDS_DATA = [
     ],
   },
   {
-    "id": "market-intel", "name": "Market Intel (Full)", "category": "Intelligence",
-    "mode": "python", "jira_fetch": false,
-    "slug": "python:market_intel_digest.py", "needs_squad": false, "push_label": "", "needs_backend": true,
-    "description": "Monthly competitive digest — 4 layers + MENA signals (30-day window)",
-    "inputs": [],
-  },
-  {
-    "id": "market-intel-focused", "name": "Market Intel (AI Focus)", "category": "Intelligence",
-    "mode": "python", "jira_fetch": false,
-    "slug": "python:market_intel_focused.py", "needs_squad": false, "push_label": "", "needs_backend": true,
-    "description": "7-day focused digest — AI Marketing + AI Care only",
-    "inputs": [],
+    "id": "market-intel", "name": "Market Intelligence", "category": "Intelligence",
+    "mode": "generate", "jira_fetch": false, "slug": "/market-intel",
+    "needs_squad": false, "push_label": "", "needs_backend": false,
+    "description": "AI-powered competitive intelligence digest tailored to your market and competitors",
+    "inputs": [
+      {"id": "company",     "label": "Your company / product",
+       "type": "text",     "required": true,  "placeholder": "e.g. Acme Corp — B2B SaaS CRM"},
+      {"id": "industry",    "label": "Industry / category",
+       "type": "text",     "required": true,  "placeholder": "e.g. CPaaS, FinTech, HR SaaS, E-commerce"},
+      {"id": "region",      "label": "Region / market",
+       "type": "select",   "required": false, "default": "global",
+       "options": [
+         {"value": "global",         "label": "Global"},
+         {"value": "north-america",  "label": "North America"},
+         {"value": "mena",           "label": "MENA"},
+         {"value": "europe",         "label": "Europe"},
+         {"value": "apac",           "label": "Asia Pacific"},
+         {"value": "latam",          "label": "Latin America"},
+         {"value": "africa",         "label": "Africa"},
+       ]},
+      {"id": "competitors", "label": "Key competitors (comma-separated)",
+       "type": "text",     "required": false, "placeholder": "e.g. Twilio, Vonage, MessageBird"},
+      {"id": "focus",       "label": "Focus areas",
+       "type": "checkboxes","required": false,
+       "default": ["features", "gtm"],
+       "options": [
+         {"value": "features",  "label": "Product & features"},
+         {"value": "pricing",   "label": "Pricing"},
+         {"value": "gtm",       "label": "GTM & marketing"},
+         {"value": "funding",   "label": "Funding & M&A"},
+         {"value": "launches",  "label": "Recent launches"},
+         {"value": "sentiment", "label": "Customer sentiment"},
+       ]},
+    ],
   },
   {
     "id": "deck", "name": "Build Deck", "category": "Presentations",
     "mode": "generate", "jira_fetch": false, "slug": "/deck",
-    "needs_squad": false, "push_label": "Save Deck Outline", "needs_backend": false,
-    "description": "AI outlines the deck → you edit → saves as Markdown file for download",
+    "needs_squad": false, "push_label": "", "needs_backend": false,
+    "description": "AI outlines a presentation deck tailored to your audience, style and tone",
     "inputs": [
-      {"id": "topic", "label": "Deck topic & audience",
-       "type": "textarea", "required": true,
-       "placeholder": "Describe the topic and audience (customer-facing or internal)…"},
+      {"id": "topic",    "label": "Topic & objective",
+       "type": "textarea","required": true,
+       "placeholder": "What is this deck about and what should the audience do or feel after seeing it?"},
+      {"id": "audience", "label": "Audience",
+       "type": "select", "required": false, "default": "internal",
+       "options": [
+         {"value": "internal",  "label": "Internal team"},
+         {"value": "executive", "label": "Executive / leadership"},
+         {"value": "customer",  "label": "Customer-facing"},
+         {"value": "sales",     "label": "Sales pitch"},
+         {"value": "board",     "label": "Board / investors"},
+       ]},
+      {"id": "style",    "label": "Visual style",
+       "type": "select", "required": false, "default": "professional",
+       "options": [
+         {"value": "professional", "label": "Professional & clean"},
+         {"value": "bold",         "label": "Bold & direct"},
+         {"value": "minimal",      "label": "Minimal & elegant"},
+         {"value": "playful",      "label": "Playful & energetic"},
+         {"value": "corporate",    "label": "Corporate & formal"},
+       ]},
+      {"id": "tone",     "label": "Tone",
+       "type": "select", "required": false, "default": "confident",
+       "options": [
+         {"value": "confident",      "label": "Confident & clear"},
+         {"value": "conversational", "label": "Conversational"},
+         {"value": "inspiring",      "label": "Inspiring & visionary"},
+         {"value": "analytical",     "label": "Data-driven & analytical"},
+       ]},
+      {"id": "length",   "label": "Length",
+       "type": "select", "required": false, "default": "medium",
+       "options": [
+         {"value": "short",  "label": "Short — 5 to 7 slides"},
+         {"value": "medium", "label": "Medium — 8 to 10 slides"},
+         {"value": "long",   "label": "Long — 12 to 15 slides"},
+       ]},
     ],
   },
 ];
@@ -188,6 +243,7 @@ const state = {
   backendUrl:        localStorage.getItem('aipm_backend_url') || 'http://localhost:5001',
   backendConnected:  false,
   anthropicKey:      localStorage.getItem('aipm_anthropic_key') || '',
+  companyContext:    localStorage.getItem('aipm_company_context') || '',
   jiraFetchMeta:     {},
 };
 
@@ -407,6 +463,15 @@ function openSettings() {
           <div class="settings-hint">Your key is stored only in this browser. Never shared with anyone. Get yours at <a href="https://console.anthropic.com" target="_blank" style="color:#818cf8">console.anthropic.com</a></div>
         </div>
         <div class="settings-section">
+          <div class="settings-section-title">Company Context</div>
+          <textarea id="settings-context-input" class="settings-input" rows="4" placeholder="Describe your company, product, market, and role. e.g. 'I'm a PM at Acme Corp, a B2B SaaS company building HR automation tools for mid-market companies in North America.'"></textarea>
+          <div class="settings-row" style="margin-top:8px">
+            <button id="settings-context-save" class="settings-btn-save">Save Context</button>
+            <button id="settings-context-clear" class="settings-btn-clear">Clear</button>
+          </div>
+          <div class="settings-hint">Used by all AI commands to tailor output to your company. The more detail you give, the better the results.</div>
+        </div>
+        <div class="settings-section">
           <div class="settings-section-title">Local Backend URL</div>
           <div class="settings-row">
             <input id="settings-backend-input" type="text" class="settings-input" placeholder="http://localhost:5001" />
@@ -441,6 +506,19 @@ function openSettings() {
       if (state.activeCommand) validateRunBtn();
     });
 
+    document.getElementById("settings-context-save").addEventListener("click", () => {
+      const val = document.getElementById("settings-context-input").value.trim();
+      state.companyContext = val;
+      if (val) localStorage.setItem('aipm_company_context', val);
+      else localStorage.removeItem('aipm_company_context');
+    });
+
+    document.getElementById("settings-context-clear").addEventListener("click", () => {
+      state.companyContext = "";
+      localStorage.removeItem('aipm_company_context');
+      document.getElementById("settings-context-input").value = "";
+    });
+
     document.getElementById("settings-backend-save").addEventListener("click", async () => {
       const url = document.getElementById("settings-backend-input").value.trim();
       const statusEl = document.getElementById("settings-backend-status");
@@ -462,10 +540,12 @@ function openSettings() {
   }
 
   // Populate current values
-  const keyInput = document.getElementById("settings-key-input");
+  const keyInput     = document.getElementById("settings-key-input");
   const backendInput = document.getElementById("settings-backend-input");
-  if (keyInput) keyInput.value = state.anthropicKey ? "••••••••••••" : "";
+  const ctxInput     = document.getElementById("settings-context-input");
+  if (keyInput)     keyInput.value     = state.anthropicKey ? "••••••••••••" : "";
   if (backendInput) backendInput.value = state.backendUrl;
+  if (ctxInput)     ctxInput.value     = state.companyContext;
 
   // Reset status
   const statusEl = document.getElementById("settings-backend-status");
@@ -1115,11 +1195,12 @@ async function startRun() {
       "x-anthropic-key": state.anthropicKey,
     },
     body: JSON.stringify({
-      command_id:   cmd.id,
-      squad_key:    state.currentSquad,
-      squad_label:  _squadLabel(state.currentSquad),
-      inputs:       gatherInputs(cmd),
-      jira_context: jiraContext,
+      command_id:      cmd.id,
+      squad_key:       state.currentSquad,
+      squad_label:     _squadLabel(state.currentSquad),
+      inputs:          gatherInputs(cmd),
+      jira_context:    jiraContext,
+      company_context: state.companyContext,
     }),
   }).then(res => handleStream(res, "generate")).catch(onStreamError);
 }
