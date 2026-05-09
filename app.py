@@ -1278,6 +1278,18 @@ def oauth_logout():
 # API routes
 # ---------------------------------------------------------------------------
 
+@app.route("/")
+def index():
+    return send_from_directory(PROJECT_ROOT / "web", "index.html")
+
+@app.route("/setup")
+def setup():
+    return send_from_directory(PROJECT_ROOT / "web" / "setup", "index.html")
+
+@app.route("/static/<path:filename>")
+def web_static(filename):
+    return send_from_directory(PROJECT_ROOT / "web" / "static", filename)
+
 @app.route("/health")
 def health():
     return jsonify({"ok": True, "jira": get_valid_token() is not None})
