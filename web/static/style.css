@@ -668,3 +668,10 @@ kbd {
 .no-key-overlay .nk-desc { font-size:13px; max-width:320px; line-height:1.6; }
 .no-key-overlay .nk-btn { background:#6366f1; border:none; border-radius:6px; color:#fff; font-size:12px; font-weight:600; padding:8px 16px; cursor:pointer; margin-top:4px; }
 .no-key-overlay .nk-btn:hover { background:#4f46e5; }
+
+/* ── Checkboxes group ───────────────────────────────────────────────────── */
+.field-checkboxes { display:flex; flex-wrap:wrap; gap:6px; padding:2px 0; }
+.field-checkbox-label { display:inline-flex; align-items:center; gap:5px; cursor:pointer; font-size:12px; color:#94a3b8; padding:5px 10px; border-radius:6px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.03); transition:border-color .15s, background .15s, color .15s; user-select:none; }
+.field-checkbox-label:hover { border-color:rgba(99,102,241,.4); color:#c7d2fe; }
+.field-checkbox-label input[type=checkbox] { accent-color:#6366f1; width:13px; height:13px; cursor:pointer; flex-shrink:0; }
+.field-checkbox-label:has(input:checked) { border-color:rgba(99,102,241,.5); background:rgba(99,102,241,.12); color:#c7d2fe; }

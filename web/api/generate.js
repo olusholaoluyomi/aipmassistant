@@ -23,11 +23,33 @@ const PROMPTS = {
     maxTokens: 3000,
   },
   story: {
-    system:
-      UNIFONIC_CONTEXT +
-      "\n\nWrite a Jira user story in standard format. Be specific and professional.\n\nOutput format:\n## User Story\n**As a** [user type], **I want to** [action], **so that** [benefit].\n\n## Acceptance Criteria\n- **Given** [context], **When** [action], **Then** [expected result]\n(Write 3–5 acceptance criteria)\n\n## Story Points\n[Estimate: 1, 2, 3, 5, or 8 — with a one-line rationale]\n\n## Dependencies & Notes\n[Dependencies, edge cases, or technical notes — or \"None\"]\n\nUse business language. Keep acceptance criteria precise and testable.",
-    user: (squad, inputs, context) =>
-      `Squad: ${squad}\n\nFeature: ${inputs.description || ""}`,
+    system: UNIFONIC_CONTEXT + "\n\nWrite a Jira user story. Be specific and professional. Use business language. Keep acceptance criteria precise and testable.",
+    user: (squad, inputs) => {
+      const acFormat = inputs.ac_format || "gherkin";
+      const extras = (inputs.extras || "story_points,dependencies").split(",").map(s => s.trim()).filter(Boolean);
+
+      const acFormats = {
+        "gherkin":    "Gherkin format — for each criterion:\n- **Given** [context], **When** [action], **Then** [expected result]",
+        "checklist":  "Checklist format — for each criterion:\n- [ ] [acceptance criterion]",
+        "test-cases": "Numbered test cases — for each criterion:\n1. [Scenario] → **Expected:** [result]",
+      };
+      const acInstruction = acFormats[acFormat] || acFormats["gherkin"];
+
+      const sections = [
+        "## User Story",
+        "**As a** [user type], **I want to** [action], **so that** [benefit].",
+        "",
+        "## Acceptance Criteria",
+        `Write 3–5 criteria in ${acInstruction}`,
+      ];
+
+      if (extras.includes("edge_cases"))      sections.push("", "## Edge Cases", "List 2–3 edge cases or failure scenarios to handle.");
+      if (extras.includes("story_points"))    sections.push("", "## Story Points", "Estimate: 1, 2, 3, 5, or 8 — with a one-line rationale.");
+      if (extras.includes("dependencies"))    sections.push("", "## Dependencies & Notes", "List dependencies or write \"None\".");
+      if (extras.includes("technical_notes")) sections.push("", "## Technical Notes", "Any technical considerations the dev team should know.");
+
+      return `Squad: ${squad}\n\nFeature: ${inputs.description || ""}\n\nOutput format:\n${sections.join("\n")}`;
+    },
     maxTokens: 2048,
   },
   "release-notes": {

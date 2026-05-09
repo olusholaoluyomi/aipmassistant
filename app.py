@@ -548,6 +548,23 @@ COMMANDS = [
             {"id": "description", "label": "Feature description",
              "type": "textarea", "required": True,
              "placeholder": "Describe the feature or bug fix…"},
+            {"id": "ac_format", "label": "Acceptance Criteria Format",
+             "type": "select", "required": False,
+             "default": "gherkin",
+             "options": [
+                 {"value": "gherkin",     "label": "Gherkin (Given / When / Then)"},
+                 {"value": "checklist",   "label": "Checklist"},
+                 {"value": "test-cases",  "label": "Test Cases (numbered)"},
+             ]},
+            {"id": "extras", "label": "Include",
+             "type": "checkboxes", "required": False,
+             "default": ["story_points", "dependencies"],
+             "options": [
+                 {"value": "edge_cases",      "label": "Edge cases"},
+                 {"value": "story_points",    "label": "Story points"},
+                 {"value": "dependencies",    "label": "Dependencies"},
+                 {"value": "technical_notes", "label": "Technical notes"},
+             ]},
         ],
     },
     {

@@ -45,6 +45,22 @@ const COMMANDS_DATA = [
       {"id": "description", "label": "Feature description",
        "type": "textarea", "required": true,
        "placeholder": "Describe the feature or bug fix…"},
+      {"id": "ac_format", "label": "Acceptance Criteria Format",
+       "type": "select", "required": false, "default": "gherkin",
+       "options": [
+         {"value": "gherkin",    "label": "Gherkin (Given / When / Then)"},
+         {"value": "checklist",  "label": "Checklist"},
+         {"value": "test-cases", "label": "Test Cases (numbered)"},
+       ]},
+      {"id": "extras", "label": "Include",
+       "type": "checkboxes", "required": false,
+       "default": ["story_points", "dependencies"],
+       "options": [
+         {"value": "edge_cases",      "label": "Edge cases"},
+         {"value": "story_points",    "label": "Story points"},
+         {"value": "dependencies",    "label": "Dependencies"},
+         {"value": "technical_notes", "label": "Technical notes"},
+       ]},
     ],
   },
   {
@@ -783,15 +799,46 @@ function buildInputFields(cmd) {
       el.className = "field-input field-fix-version-select";
       el.innerHTML = `<option value="">— ${inp.placeholder || "Select a squad first…"} —</option>`;
       if (state.currentSquad && state.backendConnected) loadFixVersionOptions(el, state.currentSquad);
+    } else if (inp.type === "select") {
+      el = document.createElement("select");
+      el.className = "field-input";
+      (inp.options || []).forEach(opt => {
+        const o = document.createElement("option");
+        o.value = opt.value;
+        o.textContent = opt.label;
+        if (opt.value === (inp.default || "")) o.selected = true;
+        el.appendChild(o);
+      });
+    } else if (inp.type === "checkboxes") {
+      el = document.createElement("div");
+      el.className = "field-checkboxes";
+      const defaults = inp.default || [];
+      (inp.options || []).forEach(opt => {
+        const lbl = document.createElement("label");
+        lbl.className = "field-checkbox-label";
+        const cb = document.createElement("input");
+        cb.type    = "checkbox";
+        cb.value   = opt.value;
+        cb.checked = defaults.includes(opt.value);
+        cb.className = "field-checkbox";
+        cb.addEventListener("change", validateRunBtn);
+        lbl.appendChild(cb);
+        lbl.appendChild(document.createTextNode(" " + opt.label));
+        el.appendChild(lbl);
+      });
     } else {
       el = document.createElement("input");
       el.type = "text";
       el.className = "field-input";
     }
-    el.id          = `field-${inp.id}`;
-    if (inp.type !== "sprint-select" && inp.type !== "fix-version-select") el.placeholder = inp.placeholder || "";
-    el.addEventListener("change", () => { validateField(inp, el); validateRunBtn(); });
-    el.addEventListener("input",  () => { validateField(inp, el); validateRunBtn(); });
+    el.id = `field-${inp.id}`;
+    if (inp.type !== "sprint-select" && inp.type !== "fix-version-select" && inp.type !== "checkboxes") {
+      el.placeholder = inp.placeholder || "";
+    }
+    if (inp.type !== "checkboxes") {
+      el.addEventListener("change", () => { validateField(inp, el); validateRunBtn(); });
+      el.addEventListener("input",  () => { validateField(inp, el); validateRunBtn(); });
+    }
     wrap.appendChild(el);
 
     const hint = document.createElement("span");
@@ -867,7 +914,13 @@ function gatherInputs(cmd) {
   const result = {};
   cmd.inputs.forEach(inp => {
     const el = document.getElementById(`field-${inp.id}`);
-    if (el) result[inp.id] = el.value.trim();
+    if (!el) return;
+    if (inp.type === "checkboxes") {
+      result[inp.id] = Array.from(el.querySelectorAll("input[type=checkbox]:checked"))
+        .map(cb => cb.value).join(",");
+    } else {
+      result[inp.id] = el.value.trim();
+    }
   });
   return result;
 }
