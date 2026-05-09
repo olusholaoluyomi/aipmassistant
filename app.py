@@ -35,7 +35,11 @@ _load_env()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", os.urandom(24))
-CORS(app, origins="*")
+CORS(app, origins=[
+    "https://aipmassistant-pcj1.vercel.app",
+    "http://localhost:5001",
+    "http://127.0.0.1:5001",
+])
 
 PROJECT_ROOT = Path(__file__).parent
 OUTPUTS_DIR  = PROJECT_ROOT / "outputs"
