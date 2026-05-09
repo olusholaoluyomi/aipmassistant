@@ -670,6 +670,11 @@ kbd {
 .no-key-overlay .nk-btn:hover { background:#4f46e5; }
 
 /* ── Checkboxes group ───────────────────────────────────────────────────── */
+.field-color-wrap { display:flex; align-items:center; gap:10px; }
+.field-color-picker { width:42px; height:34px; padding:2px; border:1px solid rgba(255,255,255,.12); border-radius:6px; background:rgba(255,255,255,.05); cursor:pointer; }
+.field-color-picker::-webkit-color-swatch-wrapper { padding:0; }
+.field-color-picker::-webkit-color-swatch { border:none; border-radius:4px; }
+.field-color-hex { font-size:12px; color:#94a3b8; font-family:monospace; }
 .field-checkboxes { display:flex; flex-wrap:wrap; gap:6px; padding:2px 0; }
 .field-checkbox-label { display:inline-flex; align-items:center; gap:5px; cursor:pointer; font-size:12px; color:#94a3b8; padding:5px 10px; border-radius:6px; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.03); transition:border-color .15s, background .15s, color .15s; user-select:none; }
 .field-checkbox-label:hover { border-color:rgba(99,102,241,.4); color:#c7d2fe; }

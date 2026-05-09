@@ -229,6 +229,14 @@ const COMMANDS_DATA = [
          {"value": "medium", "label": "Medium — 8 to 10 slides"},
          {"value": "long",   "label": "Long — 12 to 15 slides"},
        ]},
+      {"id": "company_name",  "label": "Company / presenter name (optional)",
+       "type": "text",        "required": false,
+       "placeholder": "e.g. Acme Corp — shown in footer & title slide"},
+      {"id": "primary_color", "label": "Brand color (optional — overrides theme color)",
+       "type": "color",       "required": false, "default": "#1B3A6B"},
+      {"id": "logo_url",      "label": "Logo URL (optional — .png or .svg recommended)",
+       "type": "text",        "required": false,
+       "placeholder": "https://your-cdn.com/logo.png"},
     ],
   },
 ];
@@ -910,6 +918,23 @@ function buildInputFields(cmd) {
         lbl.appendChild(document.createTextNode(" " + opt.label));
         el.appendChild(lbl);
       });
+    } else if (inp.type === "color") {
+      const colorWrap = document.createElement("div");
+      colorWrap.className = "field-color-wrap";
+      el = document.createElement("input");
+      el.type      = "color";
+      el.className = "field-color-picker";
+      el.value     = inp.default || "#1B3A6B";
+      el.id        = `field-${inp.id}`;
+      const hexSpan = document.createElement("span");
+      hexSpan.className   = "field-color-hex";
+      hexSpan.textContent = el.value;
+      el.addEventListener("input", () => { hexSpan.textContent = el.value; validateRunBtn(); });
+      colorWrap.appendChild(el);
+      colorWrap.appendChild(hexSpan);
+      wrap.appendChild(colorWrap);
+      inputFields.appendChild(wrap);
+      return; // skip rest of forEach — color input is fully wired above
     } else {
       el = document.createElement("input");
       el.type = "text";
@@ -1513,9 +1538,12 @@ function onPushError(err) {
 
 // ── Deck builder (.pptx download) ──────────────────────────────────────────
 function doBuildDeck(content) {
-  const inputs   = gatherInputs(state.activeCommand);
-  const style    = inputs.style    || "professional";
-  const topic    = (inputs.topic  || "Presentation").substring(0, 80);
+  const inputs        = gatherInputs(state.activeCommand);
+  const style         = inputs.style         || "professional";
+  const topic         = (inputs.topic       || "Presentation").substring(0, 80);
+  const company_name  = inputs.company_name  || "";
+  const logo_url      = inputs.logo_url      || "";
+  const primary_color = inputs.primary_color || "";
 
   setRunning(true, "push");
   pushPanel.classList.remove("hidden");
@@ -1529,7 +1557,7 @@ function doBuildDeck(content) {
   fetch("/api/build-deck", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content, style, title: topic }),
+    body: JSON.stringify({ content, style, title: topic, company_name, logo_url, primary_color }),
   })
   .then(async res => {
     if (!res.ok) {
