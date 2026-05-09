@@ -71,6 +71,8 @@ const COMMANDS_DATA = [
     "inputs": [
       {"id": "fix_version", "label": "Release (Fix Version)", "type": "fix-version-select",
        "required": true, "placeholder": "Select a squad first…"},
+      {"id": "period", "label": "Period label (optional)",
+       "type": "text", "required": false, "placeholder": "e.g. May 2026 — defaults to current month"},
     ],
   },
   {
@@ -170,6 +172,8 @@ const COMMANDS_DATA = [
        ]},
       {"id": "competitors", "label": "Key competitors (comma-separated)",
        "type": "text",     "required": false, "placeholder": "e.g. Twilio, Vonage, MessageBird"},
+      {"id": "period", "label": "Period label (optional)",
+       "type": "text",     "required": false, "placeholder": "e.g. May 2026 — defaults to current month"},
       {"id": "focus",       "label": "Focus areas",
        "type": "checkboxes","required": false,
        "default": ["features", "gtm"],
@@ -186,8 +190,8 @@ const COMMANDS_DATA = [
   {
     "id": "deck", "name": "Build Deck", "category": "Presentations",
     "mode": "generate", "jira_fetch": false, "slug": "/deck",
-    "needs_squad": false, "push_label": "", "needs_backend": false,
-    "description": "AI outlines a presentation deck tailored to your audience, style and tone",
+    "needs_squad": false, "push_label": "Build Deck (.pptx)", "needs_backend": false,
+    "description": "AI outlines a presentation deck tailored to your audience, style and tone — then builds a real .pptx file",
     "inputs": [
       {"id": "topic",    "label": "Topic & objective",
        "type": "textarea","required": true,
@@ -1201,6 +1205,7 @@ async function startRun() {
       inputs:          gatherInputs(cmd),
       jira_context:    jiraContext,
       company_context: state.companyContext,
+      current_date:    new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" }),
     }),
   }).then(res => handleStream(res, "generate")).catch(onStreamError);
 }
@@ -1407,6 +1412,12 @@ function doPush() {
   const content = editTextarea.value.trim();
   if (!content) return;
 
+  // Deck: build .pptx locally via Vercel function — no Flask backend needed
+  if (cmd.id === "deck") {
+    doBuildDeck(content);
+    return;
+  }
+
   setRunning(true, "push");
   pushPanel.classList.remove("hidden");
   pushOutput.textContent = "";
@@ -1498,6 +1509,51 @@ function finishPush(success) {
 function onPushError(err) {
   pushOutput.textContent += `[Fetch error: ${err.message}]\n`;
   finishPush(false);
+}
+
+// ── Deck builder (.pptx download) ──────────────────────────────────────────
+function doBuildDeck(content) {
+  const inputs   = gatherInputs(state.activeCommand);
+  const style    = inputs.style    || "professional";
+  const topic    = (inputs.topic  || "Presentation").substring(0, 80);
+
+  setRunning(true, "push");
+  pushPanel.classList.remove("hidden");
+  pushOutput.textContent = "";
+  pushLabelDisplay.textContent = "Building .pptx deck…";
+  setPushStatus("running", "Building…");
+  setPhase("pushing");
+
+  appendPushLine("Generating PowerPoint file…\n");
+
+  fetch("/api/build-deck", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, style, title: topic }),
+  })
+  .then(async res => {
+    if (!res.ok) {
+      const err = await res.text();
+      appendPushLine(`[Error: ${err}]\n`);
+      finishPush(false);
+      return;
+    }
+    const blob     = await res.blob();
+    const url      = URL.createObjectURL(blob);
+    const filename = topic.replace(/[^a-zA-Z0-9 _-]/g, "").trim().replace(/ +/g, "_") || "deck";
+    const a        = document.createElement("a");
+    a.href = url; a.download = `${filename}.pptx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    appendPushLine("✓ Deck downloaded — check your Downloads folder.\n");
+    finishPush(true);
+  })
+  .catch(err => {
+    appendPushLine(`[Fetch error: ${err.message}]\n`);
+    finishPush(false);
+  });
 }
 
 // ── Markdown rendering ─────────────────────────────────────────────────────

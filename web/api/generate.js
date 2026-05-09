@@ -99,8 +99,11 @@ Output format:
 [Any important migration notes, deprecations, or caveats — or omit this section]
 
 Do not include internal ticket numbers. Keep each bullet to one concise sentence.`,
-    user: (squad, inputs, context) =>
-      `Squad: ${squad}\n\nCompleted tickets:\n${context || "No completed tickets found."}`,
+    user: (squad, inputs, context) => {
+      const period = (inputs.period || "").trim();
+      return `Squad: ${squad}\n${period ? `Period: ${period}\n` : ""}
+Completed tickets:\n${context || "No completed tickets found."}`;
+    },
     maxTokens: 8192,
   },
 
@@ -316,11 +319,12 @@ Be specific and direct. Avoid generic observations.`,
       const region = regionMap[inputs.region] || inputs.region || "Global";
       const focus  = (inputs.focus || "features,gtm").split(",").map(f => focusLabels[f.trim()] || f.trim()).join(", ");
       const competitors = inputs.competitors ? `Key competitors: ${inputs.competitors}` : "Identify the main competitors";
+      const period = (inputs.period || "").trim();
       return `Company / Product: ${inputs.company || "Not specified"}
 Industry / Category: ${inputs.industry || "Not specified"}
 Region / Market: ${region}
 ${competitors}
-Focus areas: ${focus}
+Focus areas: ${focus}${period ? `\nPeriod: ${period}` : ""}
 
 Generate a comprehensive competitive intelligence digest for this company.`;
     },
@@ -414,7 +418,7 @@ export default async function handler(req) {
     });
   }
 
-  const { command_id, squad_key, squad_label, inputs = {}, jira_context, company_context } = body;
+  const { command_id, squad_key, squad_label, inputs = {}, jira_context, company_context, current_date } = body;
 
   const prompt = PROMPTS[command_id];
   if (!prompt) {
@@ -423,9 +427,10 @@ export default async function handler(req) {
     });
   }
 
-  // Build system prompt: user's company context + command-specific instructions
-  const persona = (company_context || "").trim() || GENERIC_CONTEXT;
-  const systemPrompt = persona + "\n\n" + prompt.instructions;
+  // Build system prompt: user's company context + date + command-specific instructions
+  const persona   = (company_context || "").trim() || GENERIC_CONTEXT;
+  const today     = (current_date || "").trim() || new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const systemPrompt = persona + `\n\nToday's date: ${today}` + "\n\n" + prompt.instructions;
 
   const squad   = squad_label || squad_key || "No squad selected";
   const userMsg = prompt.user(squad, inputs, jira_context || null);

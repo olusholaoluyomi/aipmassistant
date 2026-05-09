@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.51.0"
+    "@anthropic-ai/sdk": "^0.51.0",
+    "pptxgenjs": "^3.12.0"
   }
 }
