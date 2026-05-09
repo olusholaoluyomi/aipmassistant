@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI PM Assistant</title>
+  <link rel="stylesheet" href="./static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+</head>
+<body>
+
+<!-- ═══ STATUS BANNER ═══════════════════════════════════════════════════ -->
+<div id="auth-banner" class="status-banner hidden">
+  <span id="auth-banner-msg"></span>
+  <button class="status-banner-close" onclick="document.getElementById('auth-banner').classList.add('hidden');document.body.classList.remove('has-banner')">✕</button>
+</div>
+
+<!-- ═══ HEADER ══════════════════════════════════════════════════════════ -->
+<header class="header">
+  <div class="header-left">
+    <div class="logo">
+      <span class="logo-dot"></span>
+      AI PM Assistant
+    </div>
+    <span class="header-tagline">Unifonic Product Ops</span>
+  </div>
+  <div class="header-right">
+    <div class="engine-pills">
+      <span class="pill pill-haiku" title="Generation commands use Haiku">⚡ Haiku</span>
+      <span class="pill pill-jira"  title="Jira/Confluence connected via OAuth">🔗 Jira</span>
+    </div>
+    <label class="squad-label" for="squad-select">Squad</label>
+    <select id="squad-select" class="squad-select">
+      <option value="">— Select squad —</option>
+    </select>
+    <button id="settings-btn" class="shortcuts-btn" title="Settings (API key, backend URL)">⚙</button>
+    <button id="shortcuts-btn" class="shortcuts-btn" title="Keyboard shortcuts (?)">?</button>
+  </div>
+</header>
+
+<!-- ═══ BODY ═════════════════════════════════════════════════════════════ -->
+<div class="body-grid">
+
+  <!-- ── SIDEBAR ────────────────────────────────────────────────────── -->
+  <aside class="sidebar">
+
+    <!-- Search -->
+    <div class="sidebar-search-wrap">
+      <input id="cmd-search" type="search" class="cmd-search"
+             placeholder="Search commands… (Ctrl+K)" autocomplete="off" />
+    </div>
+
+    <!-- Command list -->
+    <nav id="command-nav" class="command-nav"></nav>
+    <div id="search-empty" class="search-empty hidden">No commands match</div>
+
+    <!-- History -->
+    <div id="history-panel" class="history-panel hidden">
+      <button class="history-header" id="history-toggle">
+        <span>Recent runs</span>
+        <span id="history-count" class="history-count"></span>
+        <span id="history-chevron" class="history-chevron">▾</span>
+      </button>
+      <div id="history-list" class="history-list"></div>
+    </div>
+
+    <!-- Input panel -->
+    <div class="input-panel">
+      <div id="command-title" class="command-title">Select a command</div>
+      <div id="command-desc" class="command-desc"></div>
+      <div id="mode-badge-wrap"></div>
+      <div id="input-fields" class="input-fields"></div>
+      <div id="squad-warning" class="squad-warning hidden">
+        <span>⚠</span> Select a squad above first
+      </div>
+      <button id="run-btn" class="run-btn" disabled>
+        <span class="run-icon">▶</span>
+        <span id="run-btn-label">Generate</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ── MAIN ───────────────────────────────────────────────────────── -->
+  <main class="main-panel">
+
+    <div class="output-header">
+      <div class="output-header-left">
+        <span id="output-label" class="output-label">Output</span>
+        <span id="phase-badge" class="phase-badge hidden"></span>
+      </div>
+      <div class="output-actions">
+        <span id="status-indicator" class="status-indicator"></span>
+        <button id="regenerate-btn" class="icon-btn hidden">↺ Regenerate</button>
+        <button id="copy-btn" class="icon-btn hidden">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          Copy
+        </button>
+      </div>
+    </div>
+
+    <div id="output-panel" class="output-panel">
+      <div class="empty-state">
+        <div class="empty-icon">⚡</div>
+        <div>Pick a command on the left and click <strong>Generate</strong> or <strong>Run</strong>.</div>
+        <div class="empty-sub">Generation commands draft with Haiku first — you edit before anything hits Jira.</div>
+      </div>
+    </div>
+
+    <div id="edit-panel" class="edit-panel hidden">
+      <div class="edit-header">
+        <span class="edit-header-title">✏️ Review &amp; edit before pushing</span>
+        <span class="edit-header-note">Changes you make here are what gets sent to Jira / Confluence.</span>
+      </div>
+      <textarea id="edit-textarea" class="edit-textarea" spellcheck="true"></textarea>
+      <div class="edit-actions">
+        <button id="push-btn" class="push-btn hidden">
+          <span id="push-btn-label">Push to Jira</span>
+          <span class="push-arrow">→</span>
+        </button>
+        <span class="edit-hint" id="edit-hint"></span>
+      </div>
+    </div>
+
+    <div id="push-panel" class="push-panel hidden">
+      <div class="push-panel-header">
+        <span id="push-label-display"></span>
+        <span id="push-status-indicator" class="status-indicator"></span>
+      </div>
+      <div id="push-output" class="push-output"></div>
+    </div>
+
+    <div id="continue-bar" class="continue-bar hidden">
+      <div class="continue-label">
+        <span class="pulse-dot"></span>
+        Claude is waiting for your response
+      </div>
+      <div class="continue-input-row">
+        <input id="continue-input" type="text" class="continue-input"
+               placeholder='Type "approve", "cancel", or any follow-up…' />
+        <button id="continue-btn" class="continue-btn">Continue</button>
+      </div>
+      <div class="continue-quick-btns">
+        <button class="quick-btn" data-value="approve">Approve</button>
+        <button class="quick-btn" data-value="cancel">Cancel</button>
+        <button class="quick-btn" data-value="yes">Yes</button>
+        <button class="quick-btn" data-value="no">No</button>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ═══ SHORTCUTS MODAL ══════════════════════════════════════════════════ -->
+<div id="shortcuts-modal" class="shortcuts-modal hidden">
+  <div class="shortcuts-dialog">
+    <div class="shortcuts-dialog-header">
+      <span class="shortcuts-title">Keyboard Shortcuts</span>
+      <button id="shortcuts-close" class="shortcuts-close">✕</button>
+    </div>
+    <table class="shortcuts-table">
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td>Run / Generate command</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd> or <kbd>/</kbd></td><td>Focus command search</td></tr>
+      <tr><td><kbd>Escape</kbd></td><td>Clear output &amp; reset / close modal</td></tr>
+      <tr><td><kbd>?</kbd></td><td>Show this shortcuts panel</td></tr>
+    </table>
+  </div>
+</div>
+
+<script src="./static/app.js"></script>
+</body>
+</html>

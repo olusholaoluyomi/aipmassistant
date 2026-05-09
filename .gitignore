@@ -17,3 +17,5 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+web/node_modules/
+.atlassian_tokens.json

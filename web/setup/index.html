@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI PM Assistant — Setup Guide</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --green:   #1AD678;
+      --teal:    #009EA6;
+      --purple:  #7C3AED;
+      --bg:      #0D1117;
+      --panel:   #161B22;
+      --panel2:  #1C2230;
+      --border:  #2D3748;
+      --text:    #E2E8F0;
+      --muted:   #8B9BB4;
+      --danger:  #F56565;
+      --warning: #ECC94B;
+      --orange:  #F6AD55;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.7;
+      min-height: 100vh;
+    }
+
+    header {
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 40px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .logo-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--green); box-shadow: 0 0 8px var(--green);
+      flex-shrink: 0;
+    }
+
+    .logo-text {
+      font-size: 15px; font-weight: 700; letter-spacing: -0.3px;
+    }
+
+    .logo-divider {
+      color: var(--muted); font-size: 13px;
+      padding-left: 14px; border-left: 1px solid var(--border);
+    }
+
+    .back-link {
+      margin-left: auto;
+      color: var(--teal);
+      text-decoration: none;
+      font-size: 13px;
+      border: 1px solid rgba(0,158,166,0.3);
+      border-radius: 6px;
+      padding: 5px 12px;
+    }
+    .back-link:hover { background: rgba(0,158,166,0.1); }
+
+    .container {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+
+    h1 {
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 15px;
+      margin-bottom: 40px;
+    }
+
+    .step {
+      margin-bottom: 40px;
+    }
+
+    .step-header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    .step-num {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      background: rgba(124,58,237,0.2);
+      border: 1px solid rgba(124,58,237,0.4);
+      color: #A78BFA;
+      font-size: 13px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .step-title {
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .step-body {
+      padding-left: 46px;
+    }
+
+    .step-body p {
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    pre, code {
+      font-family: "SFMono-Regular", Consolas, "Courier New", monospace;
+    }
+
+    .code-block {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 18px;
+      font-size: 13px;
+      color: var(--green);
+      margin: 10px 0 14px;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    .inline-code {
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 13px;
+      color: var(--green);
+    }
+
+    .callout {
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin: 12px 0;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .callout.info {
+      background: rgba(0,158,166,0.08);
+      border: 1px solid rgba(0,158,166,0.25);
+      color: var(--text);
+    }
+
+    .callout.warning {
+      background: rgba(236,201,75,0.08);
+      border: 1px solid rgba(236,201,75,0.25);
+      color: var(--warning);
+    }
+
+    .callout.tip {
+      background: rgba(26,214,120,0.07);
+      border: 1px solid rgba(26,214,120,0.2);
+      color: var(--green);
+    }
+
+    a {
+      color: var(--teal);
+      text-decoration: none;
+    }
+    a:hover { text-decoration: underline; }
+
+    .env-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      margin: 12px 0;
+    }
+    .env-table th {
+      background: var(--panel2);
+      color: var(--teal);
+      font-weight: 600;
+      text-align: left;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+    }
+    .env-table td {
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      color: var(--text);
+      vertical-align: top;
+    }
+    .env-table td:first-child {
+      font-family: monospace;
+      color: var(--green);
+    }
+    .env-table tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+
+    .troubleshoot-item {
+      margin-bottom: 20px;
+      padding: 16px 18px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .troubleshoot-q {
+      font-weight: 600;
+      color: var(--orange);
+      margin-bottom: 6px;
+    }
+    .troubleshoot-a {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 40px 0;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 20px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo-dot"></span>
+  <span class="logo-text">AI PM Assistant</span>
+  <span class="logo-divider">Setup Guide</span>
+  <a href="../" class="back-link">← Back to app</a>
+</header>
+
+<div class="container">
+
+  <h1>Local Backend Setup</h1>
+  <p class="subtitle">The AI PM Assistant runs Claude generation in your browser via Vercel. To use Jira and Confluence features, you also need the local Flask bridge running on your machine.</p>
+
+  <div class="callout info">
+    <strong>What runs where:</strong> AI generation (Claude/Haiku) happens via Vercel — no local server needed for that. The local backend only handles Atlassian OAuth and Jira/Confluence REST calls.
+  </div>
+
+  <hr class="divider" />
+  <div class="section-label">Installation steps</div>
+
+  <!-- Step 1 -->
+  <div class="step">
+    <div class="step-header">
+      <span class="step-num">1</span>
+      <span class="step-title">Prerequisites</span>
+    </div>
+    <div class="step-body">
+      <p>Make sure you have the following installed on your machine:</p>
+      <ul style="color:var(--muted);padding-left:20px;margin-bottom:10px;">
+        <li><strong style="color:var(--text)">Python 3.9+</strong> — <a href="https://python.org/downloads" target="_blank">python.org/downloads</a></li>
+        <li><strong style="color:var(--text)">pip</strong> — bundled with Python 3.9+</li>
+      </ul>
+      <p>Verify your Python version:</p>
+      <div class="code-block">python --version</div>
+    </div>
+  </div>
+
+  <!-- Step 2 -->
+  <div class="step">
+    <div class="step-header">
+      <span class="step-num">2</span>
+      <span class="step-title">Get the files</span>
+    </div>
+    <div class="step-body">
+      <p>Clone the repository or download and extract the ZIP to a folder on your machine.</p>
+      <div class="code-block">git clone &lt;repo-url&gt;
+cd AIPMAssistant</div>
+      <p>Or download the ZIP, extract it, and open the folder in your terminal.</p>
+    </div>
+  </div>
+
+  <!-- Step 3 -->
+  <div class="step">
+    <div class="step-header">
+      <span class="step-num">3</span>
+      <span class="step-title">Install Python dependencies</span>
+    </div>
+    <div class="step-body">
+      <p>From the project root folder, run:</p>
+      <div class="code-block">pip install -r requirements.txt</div>
+      <p>This installs Flask, flask-cors, requests, and other dependencies.</p>
+    </div>
+  </div>
+
+  <!-- Step 4 -->
+  <div class="step">
+    <div class="step-header">
+      <span class="step-num">4</span>
+      <span class="step-title">Create your <code class="inline-code">.env</code> file</span>
+    </div>
+    <div class="step-body">
+      <p>Create a file named <code class="inline-code">.env</code> in the project root (same folder as <code class="inline-code">app.py</code>):</p>
+      <div class="code-block">ATLASSIAN_CLIENT_ID=your_client_id_here
+ATLASSIAN_CLIENT_SECRET=your_client_secret_here
+SECRET_KEY=any_random_string_here</div>
+
+      <p>Required variables:</p>
+      <table class="env-table">
+        <tr>
+          <th>Variable</th>
+          <th>Description</th>
+        </tr>
+        <tr>
+          <td>ATLASSIAN_CLIENT_ID</td>
+          <td>OAuth 2.0 Client ID from developer.atlassian.com</td>
+        </tr>
+        <tr>
+          <td>ATLASSIAN_CLIENT_SECRET</td>
+          <td>OAuth 2.0 Client Secret from developer.atlassian.com</td>
+        </tr>
+        <tr>
+          <td>SECRET_KEY</td>
+          <td>Any random string — used for Flask session encryption</td>
+        </tr>
+      </table>
+
+      <div class="callout warning">
+        Never commit your <code class="inline-code">.env</code> file to git. It's already in <code class="inline-code">.gitignore</code>.
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 5 -->
+  <div class="step">
+    <div class="step-header">
+      <span class="step-num">5</span>
+      <span class="step-title">Get Atlassian OAuth 2.0 credentials</span>
+    </div>
+    <div class="step-body">
+      <p>Go to <a href="https://developer.atlassian.com/console/myapps/" target="_blank">developer.atlassian.com/console/myapps/</a> and create a new app:</p>
+      <ol style="color:var(--muted);padding-left:20px;margin-bottom:10px;">
+        <li>Click <strong style="color:var(--text)">Create</strong> → <strong style="color:var(--text)">OAuth 2.0 integration</strong></li>
+        <li>Give it a name (e.g. "AI PM Assistant")</li>
+        <li>Under <strong style="color:var(--text)">Authorization</strong>, add callback URL: <code class="inline-code">http://localhost:5001/oauth/callback</code></li>
+        <li>Under <strong style="color:var(--text)">Permissions</strong>, enable: Jira (read/write), Confluence (read/write), User identity</li>
+        <li>Copy the <strong style="color:var(--text)">Client ID</strong> and <strong style="color:var(--text)">Secret</strong> into your <code class="inline-code">.env</code></li>
+      </ol>
+      <div class="callout tip">
+        The required OAuth scopes are: <code class="inline-code">read:jira-work write:jira-work read:jira-user read:confluence-content.all write:confluence-content offline_access read:me</code>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 6 -->
+  <div class="step">
+    <div class="step-header">
+      <span class="step-num">6</span>
+      <span class="step-title">Start the backend</span>
+    </div>
+    <div class="step-body">
+      <p>Option A — double-click <code class="inline-code">start.bat</code> (Windows)</p>
+      <p>Option B — run from terminal:</p>
+      <div class="code-block">python app.py</div>
+      <p>You should see:</p>
+      <div class="code-block" style="color:var(--muted)">============================================================
+  AI PM Assistant  —  http://localhost:5001
+============================================================
+  Jira (OAuth): not connected — open UI to connect
+  OAuth callback: http://localhost:5001/oauth/callback
+============================================================</div>
+      <p>The backend runs at <strong style="color:var(--text)">http://localhost:5001</strong> by default.</p>
+    </div>
+  </div>
+
+  <!-- Step 7 -->
+  <div class="step">
+    <div class="step-header">
+      <span class="step-num">7</span>
+      <span class="step-title">Connect Jira in the app</span>
+    </div>
+    <div class="step-body">
+      <p>Once the backend is running, open the app (<a href="../">back to app</a>) and:</p>
+      <ol style="color:var(--muted);padding-left:20px;">
+        <li>Click <strong style="color:var(--text)">⚙ Settings</strong> in the header — verify the Backend URL is <code class="inline-code">http://localhost:5001</code> and shows "Connected"</li>
+        <li>Add your Anthropic API key in Settings under "Anthropic API Key"</li>
+        <li>Click <strong style="color:var(--text)">🔗 Connect to Jira</strong> — this opens the Atlassian OAuth flow</li>
+        <li>Approve the permissions — you'll be redirected back to the app</li>
+      </ol>
+      <p style="margin-top:10px;">The header will show your Atlassian user name when connected.</p>
+    </div>
+  </div>
+
+  <hr class="divider" />
+  <div class="section-label">Troubleshooting</div>
+
+  <div class="troubleshoot-item">
+    <div class="troubleshoot-q">Backend shows "Offline" in the app</div>
+    <div class="troubleshoot-a">Make sure <code class="inline-code">python app.py</code> is running and there are no errors in the terminal. Check that the Backend URL in Settings is set to <code class="inline-code">http://localhost:5001</code>. Click "Test &amp; Save" to retry.</div>
+  </div>
+
+  <div class="troubleshoot-item">
+    <div class="troubleshoot-q">Port 5001 is already in use</div>
+    <div class="troubleshoot-a">Another process is using port 5001. Either stop it or set a different port by adding <code class="inline-code">PORT=5002</code> to your <code class="inline-code">.env</code> file. Update the Backend URL in Settings to match.</div>
+  </div>
+
+  <div class="troubleshoot-item">
+    <div class="troubleshoot-q">OAuth callback error after connecting Jira</div>
+    <div class="troubleshoot-a">Make sure the callback URL in your Atlassian app matches exactly: <code class="inline-code">http://localhost:5001/oauth/callback</code>. Also verify ATLASSIAN_CLIENT_ID and ATLASSIAN_CLIENT_SECRET are correct in your <code class="inline-code">.env</code>.</div>
+  </div>
+
+  <div class="troubleshoot-item">
+    <div class="troubleshoot-q">403 Forbidden when pushing to Jira/Confluence</div>
+    <div class="troubleshoot-a">Your OAuth token is missing write scopes. Disconnect from Jira in the header, then reconnect — this will request fresh permissions including write access.</div>
+  </div>
+
+  <div class="troubleshoot-item">
+    <div class="troubleshoot-q">AI generation not working</div>
+    <div class="troubleshoot-a">Add your Anthropic API key in Settings (⚙ in the header). Get a key at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a>. The key is stored only in your browser and never sent to anyone except Anthropic.</div>
+  </div>
+
+  <div class="troubleshoot-item">
+    <div class="troubleshoot-q">pip install fails</div>
+    <div class="troubleshoot-a">Try <code class="inline-code">pip3 install -r requirements.txt</code>. On some systems Python 3 is <code class="inline-code">python3</code> and pip is <code class="inline-code">pip3</code>.</div>
+  </div>
+
+</div>
+
+</body>
+</html>

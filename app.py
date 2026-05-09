@@ -10,11 +10,11 @@ import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from flask import (
-    Flask, render_template, request, Response,
+    Flask, request, Response,
     stream_with_context, session, jsonify, send_from_directory, abort, redirect
 )
 import requests as http
-import anthropic
+from flask_cors import CORS
 
 
 # ---------------------------------------------------------------------------
@@ -35,28 +35,11 @@ _load_env()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", os.urandom(24))
+CORS(app, origins="*")
 
 PROJECT_ROOT = Path(__file__).parent
 OUTPUTS_DIR  = PROJECT_ROOT / "outputs"
 OUTPUTS_DIR.mkdir(exist_ok=True)
-
-
-# ---------------------------------------------------------------------------
-# Anthropic (Haiku for generation)
-# ---------------------------------------------------------------------------
-
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
-
-def make_anthropic_client():
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not key:
-        return None
-    try:
-        return anthropic.Anthropic(api_key=key)
-    except Exception:
-        return None
-
-anthropic_client = make_anthropic_client()
 
 
 # ---------------------------------------------------------------------------
@@ -680,350 +663,6 @@ COMMANDS = [
 
 COMMANDS_MAP = {c["id"]: c for c in COMMANDS}
 
-# Max output tokens per command — long-form docs need more room (Haiku cap: 8192)
-COMMAND_MAX_TOKENS = {
-    "doc-pvg":        8192,
-    "rfo":            8192,
-    "release-notes":  8192,
-    "doc-feature":    6000,
-    "daily":          3000,
-    "sprint-analysis":3000,
-    "fcb-weekly":     4096,
-    "story":          2048,
-    "idea":           2048,
-    "brainstorm":     3000,
-    "deck":           6000,
-}
-
-
-# ---------------------------------------------------------------------------
-# Haiku prompts
-# ---------------------------------------------------------------------------
-
-UNIFONIC_CONTEXT = """You are an experienced product manager at Unifonic, a CPaaS and AI-native CX platform serving enterprise customers in Saudi Arabia and the GCC. Unifonic's products include WhatsApp Business API, SMS, Voice, Flow Studio (journey automation), Chatbot Builder, Agent Console, CDP, and MCC (Marketing Campaign Cloud). The company is positioning as an Agentic CX platform and is targeting IPO readiness."""
-
-HAIKU_PROMPTS = {
-
-    "daily": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Generate a concise, useful daily standup digest for a product squad. Use the live sprint data provided.
-
-Output format:
-## Sprint Health
-[1-2 sentences: overall sprint progress and risk level]
-
-## In Progress
-[bullet list of what's actively being worked on, with ticket keys]
-
-## Blockers & Risks
-[bullet list — or "None identified"]
-
-## Decisions Needed
-[items requiring PM attention — or "None"]
-
-## Today's Focus
-[2-3 recommended priorities based on the sprint data]
-
-Keep it short and actionable. PMs read this in under 60 seconds.""",
-        "user": lambda squad, inputs, context=None: (
-            f"Squad: {squad}\n\n"
-            f"Sprint Data:\n{context or 'No sprint data available.'}\n\n"
-            + (f"Meeting Notes:\n{inputs.get('notes')}\n" if inputs.get("notes") else "")
-        ),
-    },
-
-    "sprint-analysis": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Analyze the sprint data and produce an actionable sprint health report. Flag issues clearly and recommend specific actions.
-
-Output format:
-## Sprint Summary
-[Sprint name, total issues, completion %, days remaining if available]
-
-## ⚠ Issues Requiring Attention
-[List each problem with ticket key, what's wrong, and recommended action]
-Use these categories: STALE (no updates 3+ days), BLOCKED, UNASSIGNED, OVERDUE, MISSING POINTS
-
-## DoR/DoD Violations
-[Tickets that appear to violate Definition of Ready or Done — or "None"]
-
-## Recommended Actions
-[Numbered list of specific PM actions to take today]
-
-Be direct. Skip the fluffy preamble.""",
-        "user": lambda squad, inputs, context=None: (
-            f"Squad: {squad}\n\nSprint Data:\n{context or 'No sprint data available.'}"
-        ),
-    },
-
-    "story": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Write a Jira user story in standard format. Be specific and professional.
-
-Output format:
-## User Story
-**As a** [user type], **I want to** [action], **so that** [benefit].
-
-## Acceptance Criteria
-- **Given** [context], **When** [action], **Then** [expected result]
-(Write 3–5 acceptance criteria)
-
-## Story Points
-[Estimate: 1, 2, 3, 5, or 8 — with a one-line rationale]
-
-## Dependencies & Notes
-[Dependencies, edge cases, or technical notes — or "None"]
-
-Use business language. Keep acceptance criteria precise and testable.""",
-        "user": lambda squad, inputs, context=None: (
-            f"Squad: {squad}\n\nFeature: {inputs.get('description', '')}"
-        ),
-    },
-
-    "release-notes": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Write customer-facing release notes from the completed sprint tickets provided.
-Group changes by type. Use clear, non-technical language. Be concise.
-
-Output format:
-## Release Notes — [Squad Name] — [current month year]
-
-### ✨ New Features
-- [Feature name]: [One sentence describing what it does and the value to customers]
-
-### 🛠 Improvements
-- [Item]: [What improved and why it matters]
-
-### 🐛 Bug Fixes
-- [Fix description]
-
-### 📝 Notes
-[Any important migration notes, deprecations, or caveats — or omit this section]
-
-Do not include internal ticket numbers in the customer-facing output. Keep each bullet to one concise sentence.""",
-        "user": lambda squad, inputs, context=None: (
-            f"Squad: {squad}\n\nCompleted tickets:\n{context or 'No completed tickets found.'}"
-        ),
-    },
-
-    "doc-pvg": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Write a detailed Product Vision & Goal (PVG) document from the UFRF2 roadmap item provided.
-This is an internal product strategy document used to align the squad before development.
-
-Output format:
-## Product Vision & Goal
-
-### Background & Problem Statement
-[What problem are we solving? Who has it? What happens today?]
-
-### Vision
-[One crisp sentence: what does success look like for this feature?]
-
-### Goals
-[3-5 measurable goals — tie to revenue, retention, adoption, or compliance]
-
-### Non-Goals
-[What we are explicitly NOT doing in this scope]
-
-### Target Users
-[Specific personas and their pain points]
-
-### Success Metrics
-[2-4 KPIs with targets]
-
-### High-Level Solution
-[2-3 paragraphs: the approach, key capabilities, how it fits the platform]
-
-### Dependencies
-[Teams, systems, or external partners needed]
-
-### Risks & Open Questions
-[Known risks and decisions still to be made]
-
-Be specific to Unifonic's context. Write for a senior PM audience.""",
-        "user": lambda squad, inputs, context=None: (
-            f"Squad: {squad}\n\nUFRF2 Item:\n{context or 'No item data found.'}"
-        ),
-    },
-
-    "doc-feature": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Write user-facing feature documentation for the Unifonic help center.
-Clear, structured, non-technical where possible.
-
-Output format:
-## Overview
-[1–2 sentences: what this feature does and why it matters]
-
-## Who Is This For
-[Target users/personas]
-
-## How It Works
-[Step-by-step or key capabilities, 3–6 items]
-
-## Configuration
-[Setup or prerequisites — or "No configuration required"]
-
-## FAQ
-**Q: [common question]**
-A: [answer]
-(2–3 FAQs)
-
-Use plain language. This is customer-facing documentation.""",
-        "user": lambda squad, inputs, context=None: (
-            f"Feature to document:\n\n{inputs.get('description', '')}"
-        ),
-    },
-
-    "rfo": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Write a formal Reason For Outage (RFO) document from the incident ticket data provided.
-This is shared with customers and senior leadership. Be factual, clear, and professional.
-
-Output format:
-## Incident Summary
-**Date/Time:** [from ticket]
-**Duration:** [calculated or stated]
-**Severity:** [from ticket or inferred]
-**Affected Services:** [from ticket]
-
-## Timeline of Events
-| Time | Event |
-|------|-------|
-[Chronological table of key events]
-
-## Root Cause
-[Clear, factual description of what caused the incident]
-
-## Impact
-[What customers experienced. Quantify where possible.]
-
-## Resolution
-[What was done to restore service]
-
-## Prevention
-[3-5 specific actions to prevent recurrence, with owners if mentioned]
-
-## Communication Sent
-[Summary of customer communications during the incident — or "None"]
-
-Be factual. No speculation. Use professional language suitable for customer-facing disclosure.""",
-        "user": lambda squad, inputs, context=None: (
-            f"Incident ticket:\n{context or 'No incident data found.'}"
-        ),
-    },
-
-    "idea": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Write a UFRF2 internal roadmap item. Use business language — no technical jargon.
-Descriptions must explain value to customers and the business, not implementation details.
-
-Output format:
-## Feature Title
-[Short, clear title — max 8 words]
-
-## Description
-[2–3 sentences in business language: what it does, who it's for, and why it matters.
-Write as if explaining to a non-technical executive.]
-
-## Business Value
-[Revenue impact, customer retention, competitive advantage, or compliance — be specific]
-
-## Target Users
-[Which customer personas or internal teams benefit]
-
-## Success Metrics
-[How you'd measure success: 2–3 specific metrics]
-
-Keep it concise. Unifonic targets enterprise customers in KSA and the GCC.""",
-        "user": lambda squad, inputs, context=None: (
-            f"Squad: {squad}\n\nFeature idea:\n\n{inputs.get('description', '')}"
-        ),
-    },
-
-    "brainstorm": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-You are a critical product strategy advisor. Stress-test this PM's feature idea.
-Lead with weaknesses and risks — don't be encouraging upfront. Force real trade-offs.
-
-Output format:
-## ⚠ Weaknesses & Risks
-(The hardest questions and failure modes — be direct)
-
-## Approaches
-| Approach | Pros | Cons | Effort |
-|---|---|---|---|
-(2–4 approaches)
-
-## Recommendation
-One clear recommendation with a concise rationale.
-
-Be direct. No generic PM advice. This is for a senior PM who wants honest pushback.""",
-        "user": lambda squad, inputs, context=None: inputs.get("idea", ""),
-    },
-
-    "fcb-weekly": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Review the Customer Askings (FCB) items provided and produce a structured weekly review.
-
-Output format:
-## FCB Weekly Review — [current date]
-**Items reviewed:** [count]
-
-### Needs Immediate Action
-[Items that are urgent, customer-escalated, or overdue]
-
-### Recommended for Roadmap
-[Items worth creating a UFRF2 roadmap entry for — include brief rationale]
-
-### Needs More Information
-[Items that are vague or need clarification before a decision]
-
-### No Action Needed
-[Items that are duplicates, out of scope, or already addressed]
-
-### Summary
-[2-3 sentence overall assessment of this week's ask volume and themes]
-
-Be specific. Reference FCB ticket keys.""",
-        "user": lambda squad, inputs, context=None: (
-            f"Customer Askings this week:\n{context or 'No FCB items found for this period.'}"
-        ),
-    },
-
-    "deck": {
-        "system": f"""{UNIFONIC_CONTEXT}
-
-Create a complete slide outline for a branded Unifonic PowerPoint presentation.
-
-For each slide:
-### Slide [N]: [Title]
-**Key message:** [one sentence — the takeaway]
-**Bullets:**
-- [point]
-- [point]
-**Speaker notes:** [1–2 sentences for the presenter]
-
-Customer-facing: 8 slides, professional tone, value-focused, no internal jargon.
-Internal/enablement: 10 slides, direct tone, operational detail is fine.
-End with a "Next Steps" slide.""",
-        "user": lambda squad, inputs, context=None: (
-            f"Deck topic and audience:\n\n{inputs.get('topic', '')}"
-        ),
-    },
-}
-
 
 # ---------------------------------------------------------------------------
 # Jira fetch functions (for jira_fetch commands)
@@ -1456,8 +1095,9 @@ def _push_release_notes(content, squad_key, inputs):
 
 def _push_doc_pvg(content, squad_key, inputs):
     # Squad key may have been inferred from product_area during fetch
-    effective_squad = session.get("doc_pvg_squad_key") or squad_key
-    ufrf2_key       = session.get("doc_pvg_issue_key") or inputs.get("issue_key", "")
+    _push_meta = inputs.get("_push_meta", {})
+    effective_squad = _push_meta.get("doc_pvg_squad_key") or session.get("doc_pvg_squad_key") or squad_key
+    ufrf2_key       = _push_meta.get("doc_pvg_issue_key") or session.get("doc_pvg_issue_key") or inputs.get("issue_key", "")
     squad_name      = _squad_name(effective_squad)
     feature_title   = extract_title(content, "PVG")
 
@@ -1638,9 +1278,9 @@ def oauth_logout():
 # API routes
 # ---------------------------------------------------------------------------
 
-@app.route("/")
-def index():
-    return render_template("index.html")
+@app.route("/health")
+def health():
+    return jsonify({"ok": True, "jira": get_valid_token() is not None})
 
 
 @app.route("/api/auth/status")
@@ -1682,7 +1322,44 @@ def api_select_squad():
 
 @app.route("/api/commands")
 def api_commands():
-    return jsonify({"commands": COMMANDS})
+    enriched = [
+        {**cmd, "needs_backend": cmd.get("jira_fetch", False) or bool(cmd.get("push_label", ""))}
+        for cmd in COMMANDS
+    ]
+    return jsonify({"commands": enriched})
+
+
+@app.route("/api/jira/fetch")
+def api_jira_fetch():
+    command = request.args.get("command", "")
+    squad_key = request.args.get("squad_key", session.get("squad", ""))
+    form_inputs = {
+        "sprint_id":   request.args.get("sprint_id", ""),
+        "fix_version": request.args.get("fix_version", ""),
+        "issue_key":   request.args.get("issue_key", ""),
+        "ticket":      request.args.get("ticket", ""),
+        "notes":       request.args.get("notes", ""),
+    }
+    if command not in JIRA_FETCH_MAP:
+        return jsonify({"error": f"No Jira fetch for command: {command}"}), 400
+    if not get_valid_token():
+        return jsonify({"error": "Not connected to Atlassian. Open Settings and connect Jira."}), 401
+    try:
+        fetch_fn, _ = JIRA_FETCH_MAP[command]
+        context, error = fetch_fn(squad_key, form_inputs)
+        if error:
+            return jsonify({"error": error}), 400
+        meta = {}
+        if command == "doc-pvg":
+            meta = {
+                "doc_pvg_issue_key": session.get("doc_pvg_issue_key", ""),
+                "doc_pvg_squad_key": session.get("doc_pvg_squad_key", squad_key),
+            }
+        return jsonify({"context": context, "command": command, "squad_key": squad_key, "meta": meta})
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/push-fields/<command_id>/<squad_key>")
@@ -1782,84 +1459,9 @@ def api_fix_versions(squad_key):
 @app.route("/api/status")
 def api_status():
     return jsonify({
-        "haiku_ok":     anthropic_client is not None,
-        "haiku_reason": "" if anthropic_client else "ANTHROPIC_API_KEY not set in .env",
-        "jira_ok":      get_valid_token() is not None,
-        "jira_reason":  "" if get_valid_token() else "Not connected — click Connect to Jira",
+        "jira_ok":     get_valid_token() is not None,
+        "jira_reason": "" if get_valid_token() else "Not connected — click Connect to Jira",
     })
-
-
-# ── Generate (Haiku, optionally after Jira fetch) ─────────────────────────
-
-@app.route("/api/generate", methods=["POST"])
-def api_generate():
-    if not anthropic_client:
-        return jsonify({"error": "ANTHROPIC_API_KEY not set in .env"}), 503
-
-    data        = request.json or {}
-    command_id  = data.get("command_id", "")
-    squad_key   = data.get("squad", session.get("squad", ""))
-    form_inputs = data.get("inputs", {})
-
-    cmd        = COMMANDS_MAP.get(command_id)
-    prompt_cfg = HAIKU_PROMPTS.get(command_id)
-    if not cmd or not prompt_cfg:
-        return jsonify({"error": f"Unknown command: {command_id}"}), 400
-
-    squad_name  = _squad_name(squad_key)
-    squad_label = f"{squad_name} ({squad_key})" if squad_key else "No squad selected"
-
-    def generate():
-        context = None
-
-        # Step 1: Jira fetch (if needed)
-        if cmd.get("jira_fetch"):
-            if not get_valid_token():
-                yield f"data: {json.dumps({'text': '❌ Not connected to Atlassian. Click Connect to Jira in the header.\n'})}\n\n"
-                yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
-                return
-
-            fetch_fn, fetch_msg = JIRA_FETCH_MAP[command_id]
-            yield f"data: {json.dumps({'text': f'⏳ {fetch_msg}…\n', 'progress': True})}\n\n"
-
-            try:
-                context, error = fetch_fn(squad_key, form_inputs)
-                if error:
-                    yield f"data: {json.dumps({'text': f'❌ {error}\n'})}\n\n"
-                    yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
-                    return
-                lines = [l for l in context.split("\n") if l.strip()][:3]
-                yield f"data: {json.dumps({'text': f'✓ Fetched. Generating with AI…\n\n', 'progress': True})}\n\n"
-                # Signal: frontend resets rawOutput here so Jira progress isn't in edit textarea
-                yield f"data: {json.dumps({'jira_done': True})}\n\n"
-            except Exception as e:
-                yield f"data: {json.dumps({'text': f'❌ Jira error: {e}\n'})}\n\n"
-                yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
-                return
-
-        # Step 2: Build user message
-        user_fn  = prompt_cfg["user"]
-        user_msg = user_fn(squad_label, form_inputs, context)
-
-        # Step 3: Stream Haiku
-        max_tokens = COMMAND_MAX_TOKENS.get(command_id, 4096)
-        try:
-            with anthropic_client.messages.stream(
-                model=HAIKU_MODEL,
-                max_tokens=max_tokens,
-                system=prompt_cfg["system"],
-                messages=[{"role": "user", "content": user_msg}],
-            ) as stream:
-                for text in stream.text_stream:
-                    yield f"data: {json.dumps({'text': text, 'approval': False})}\n\n"
-            yield f"data: {json.dumps({'done': True, 'exit_code': 0})}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'text': f'[Haiku error: {e}]\n'})}\n\n"
-            yield f"data: {json.dumps({'done': True, 'exit_code': 1})}\n\n"
-
-    return Response(stream_with_context(generate()),
-                    content_type="text/event-stream",
-                    headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
 
 # ── Push (Jira / Confluence REST) ─────────────────────────────────────────
@@ -1872,6 +1474,7 @@ def api_push():
     content    = data.get("content", "").strip()
     inputs     = dict(data.get("inputs", {}))
     inputs["_push_fields"] = data.get("push_fields", {})
+    inputs["_push_meta"]   = data.get("push_meta", {})
 
     if not content:
         return jsonify({"error": "No content to push"}), 400
@@ -1994,7 +1597,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"  AI PM Assistant  —  http://localhost:{port}")
     print("=" * 60)
-    print(f"  Haiku (API): {'ready' if anthropic_client else 'no ANTHROPIC_API_KEY in .env'}")
+    print(f"  Claude (API): browser-side via Vercel (key stored in browser)")
     print(f"  Jira (OAuth): {'connected' if load_tokens() else 'not connected — open UI to connect'}")
     print(f"  OAuth callback: {ATLASSIAN_REDIRECT_URI}")
     print("=" * 60)
