@@ -581,7 +581,7 @@ COMMANDS = [
         "id": "doc-pvg", "name": "Generate PVG", "category": "Content",
         "mode": "generate", "jira_fetch": False, "slug": "/doc",
         "needs_squad": True, "push_label": "Publish PVG + Create Epic",
-        "description": "Share feature context → AI generates Product Vision & Goal doc → publish to Confluence + create Epic",
+        "description": "Share feature context → AI generates Product Value Guide → publish to Confluence + create Epic",
         "inputs": [
             {"id": "feature_context", "label": "Feature / initiative context",
              "type": "textarea", "required": True,

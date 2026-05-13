@@ -130,44 +130,80 @@ Completed tickets:\n${context || "No completed tickets found."}`;
   },
 
   "doc-pvg": {
-    instructions: `Write a detailed Product Vision & Goal (PVG) document from the PM context provided. This is an internal product strategy document used to align the squad before development.
+    instructions: `Write a Product Value Guide (PVG). A PVG frames the feature through customer problems and business impact, not technical specs. It tells the story of the customer's pain and how this feature solves it.
+
+Be specific and concrete. Avoid filler. Base it on the UFRF2 or PM-provided feature context. Fill gaps with reasonable inferences based on Unifonic's CPaaS and AI CX platform context, and explicitly flag anything that needs PM input.
 
 Output format:
-## Product Vision & Goal
+# PVG - [Feature Name]
 
-### Background & Problem Statement
-[What problem are we solving? Who has it? What happens today?]
+---
 
-### Vision
-[One crisp sentence: what does success look like for this feature?]
+### 1. Problem Space (The Why)
 
-### Goals
-[3-5 measurable goals — tie to revenue, retention, adoption, or compliance]
+#### Problem Statement
 
-### Non-Goals
-[What we are explicitly NOT doing in this scope]
+_What is the customer's challenge?_
 
-### Target Users
-[Specific personas and their pain points]
+[Describe the pain point from the customer's perspective. Who is affected, in what context, and what goes wrong today? Use concrete scenarios. Reference known customer segments, FCB feedback, Unifonic products, or industry patterns when relevant. Write so a non-technical reader immediately understands the frustration.]
 
-### Success Metrics
-[2-4 KPIs with targets]
+#### Problem Impact
 
-### High-Level Solution
-[2-3 paragraphs: the approach, key capabilities, how it fits the platform]
+_How does the problem affect the customer and the business?_
 
-### Dependencies
-[Teams, systems, or external partners needed]
+- [Operational impact, such as wasted supervisor time, manual workarounds, or limits to scale]
+- [Customer experience impact, such as delays, inconsistency, frustration, or churn signals]
+- [Business impact, such as missed revenue, competitive gap, or compliance risk]
+- [Unifonic impact, such as customer dissatisfaction, churn risk, or upsell blocker]
 
-### Risks & Open Questions
-[Known risks and decisions still to be made]
+---
 
-Write for a senior PM audience.`,
+### 2. Solution Space (The What)
+
+#### Narrative
+
+_Pick exactly one format that best brings the solution to life. Include only the chosen format in the final PVG._
+
+**Option A - Customer Review Format**
+> [Write a 3-5 sentence first-person review from the perspective of a customer who just used this feature. Capture the emotional before/after and the specific value they got. Make it feel real and grounded in a realistic Unifonic customer scenario.]
+
+**Option B - Objective Journalist Article Format**
+> **[Feature Name]: [Brief Headline]**
+>
+> [2-3 paragraphs covering what the feature does, key benefits with specifics, and honest considerations or trade-offs. Write in neutral, factual journalist style.]
+
+**Option C - Press Release Format**
+> **Unifonic Launches [Feature Name] to [Customer Outcome]**
+>
+> **Riyadh, Saudi Arabia - [Date]** - [Announcement paragraph. Key benefits paragraph. Spokesperson quote. Availability statement.]
+
+#### Solution Summary
+
+_How does your solution address the problem?_
+
+[1-2 sentences describing the core mechanism of the solution: what it does and how it works at a high level.]
+
+Expected outcomes:
+- [Metric 1, such as reduce manual review time by 60%]
+- [Metric 2, such as improve compliance detection rate by 30%]
+- [Metric 3, such as increase supervisor efficiency by 40%]
+
+#### Customer Experience Summary
+
+_Show how the solution will look or feel for the customer:_
+
+[Walk through the end-to-end experience from the customer's point of view. What do they see, click, configure, or receive? Describe the key touchpoints and how the feature changes their day-to-day workflow.]
+
+- **Screenshots/Diagrams:** [Include 1-3 visuals if available. Otherwise note: To Be Added]
+- **Links to Additional Resources:** [e.g., PRDs, UX flows, Figma boards, Story Maps. Otherwise: To Be Added]
+
+### PM Input Needed
+
+[List only the important assumptions, missing metrics, unclear customers, or decisions that need PM confirmation. If nothing material is missing, write "None identified."]`,
     user: (squad, inputs) =>
-      `Squad: ${squad}\n\nPM-provided feature context:\n${inputs.feature_context || inputs.description || ""}`,
+      `Squad: ${squad}\n\nUFRF2 / PM-provided feature context:\n${inputs.feature_context || inputs.description || ""}`,
     maxTokens: 8192,
   },
-
   "doc-feature": {
     instructions: `Write user-facing feature documentation for a help center. Clear, structured, non-technical where possible.
 
