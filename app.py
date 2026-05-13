@@ -218,35 +218,70 @@ def conf_req(method, path, **kwargs):
     return r.json() if r.content else {}
 
 
-_conf_homepage_cache = {}   # space_key → page_id
+def conf_v2_req(method, path, **kwargs):
+    cloud_id, _ = get_cloud_info()
+    if not cloud_id:
+        raise RuntimeError("Could not get Atlassian cloud ID.")
+    url     = f"https://api.atlassian.com/ex/confluence/{cloud_id}/wiki/api/v2{path}"
+    headers = _auth_headers()
+    if method.upper() in ("POST", "PUT", "PATCH"):
+        headers["Content-Type"] = "application/json"
+    r = http.request(method, url, headers=headers, timeout=30, **kwargs)
+    if not r.ok:
+        raise RuntimeError(_atlassian_error(r, "Confluence"))
+    return r.json() if r.content else {}
+
+
+_conf_space_id_cache = {}   # space_key -> space_id
+_conf_homepage_cache = {}   # space_key -> page_id
+
+
+def _conf_space_id(space_key):
+    """Return the Confluence v2 space ID for a space key."""
+    if space_key in _conf_space_id_cache:
+        return _conf_space_id_cache[space_key]
+    data = conf_v2_req("GET", f"/spaces?keys={urllib.parse.quote(space_key)}&limit=1")
+    results = data.get("results", [])
+    if not results:
+        raise RuntimeError(f"Confluence space not found: {space_key}")
+    space_id = str(results[0].get("id", ""))
+    if not space_id:
+        raise RuntimeError(f"Confluence space ID not returned for: {space_key}")
+    _conf_space_id_cache[space_key] = space_id
+    return space_id
+
 
 def _conf_space_homepage(space_key):
     """Return the homepage page ID for a Confluence space (cached)."""
     if space_key in _conf_homepage_cache:
         return _conf_homepage_cache[space_key]
     try:
-        data = conf_req("GET", f"/space/{space_key}?expand=homepage")
-        page_id = data.get("homepage", {}).get("id")
+        data = conf_v2_req("GET", f"/spaces?keys={urllib.parse.quote(space_key)}&limit=1")
+        results = data.get("results", [])
+        page_id = results[0].get("homepageId") if results else None
         if page_id:
+            page_id = str(page_id)
             _conf_homepage_cache[space_key] = page_id
-        return page_id
+            return page_id
     except Exception:
-        return None
+        pass
+    return None
 
 
 def _conf_create_page(title, space_key, body_html, parent_id=None):
-    """Create a Confluence page, using an explicit parent or the space homepage."""
+    """Create a Confluence page via REST v2, using an explicit parent or the space homepage."""
+    space_id = _conf_space_id(space_key)
     payload = {
-        "type":  "page",
-        "title": title,
-        "space": {"key": space_key},
-        "body":  {"storage": {"value": body_html, "representation": "storage"}},
+        "spaceId": space_id,
+        "status":  "current",
+        "title":   title,
+        "body":    {"representation": "storage", "value": body_html},
+        "subtype": "live",
     }
     parent_id = parent_id or _conf_space_homepage(space_key)
     if parent_id:
-        payload["ancestors"] = [{"id": parent_id}]
-    return conf_req("POST", "/content", json=payload)
-
+        payload["parentId"] = str(parent_id)
+    return conf_v2_req("POST", "/pages", json=payload)
 
 def jira_url(key):
     _, cloud_url = get_cloud_info()
