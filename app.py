@@ -223,6 +223,17 @@ def conf_v2_req(method, path, **kwargs):
 _conf_space_id_cache = {}   # space_key -> space_id
 _conf_homepage_cache = {}   # space_key -> page_id
 
+DEFAULT_PVG_SQUAD_KEY = "JO"
+
+SQUAD_CONFLUENCE_DEFAULTS = {
+    "JO": {
+        "space_key": "UPP",
+        "space_id": "605651588",
+        "parent_page_id": "896631191",
+        "parent_name": "Flow Studio",
+    },
+}
+
 
 def _conf_space_id(space_key):
     """Return the Confluence v2 space ID for a space key."""
@@ -256,9 +267,9 @@ def _conf_space_homepage(space_key):
     return None
 
 
-def _conf_create_page(title, space_key, body_html, parent_id=None):
+def _conf_create_page(title, space_key, body_html, parent_id=None, space_id=None):
     """Create a Confluence page via REST v2, using an explicit parent or the space homepage."""
-    space_id = _conf_space_id(space_key)
+    space_id = str(space_id or _conf_space_id(space_key))
     payload = {
         "spaceId": space_id,
         "status":  "current",
@@ -604,8 +615,8 @@ COMMANDS = [
     {
         "id": "doc-pvg", "name": "Generate PVG", "category": "Content",
         "mode": "generate", "jira_fetch": False, "slug": "/doc",
-        "needs_squad": True, "push_label": "Publish PVG to Confluence",
-        "description": "Share feature context → AI generates Product Value Guide → publish to squad Confluence section",
+        "needs_squad": False, "default_squad": DEFAULT_PVG_SQUAD_KEY, "push_label": "Publish PVG to Confluence",
+        "description": "Share feature context → AI generates Product Value Guide → publish to Flow Studio Confluence section",
         "inputs": [
             {"id": "feature_context", "label": "Feature / initiative context",
              "type": "textarea", "required": True,
@@ -772,6 +783,9 @@ def _squad_config_path(key):
 
 def _squad_conf_parent_page_id(key):
     """Read the selected squad's Confluence parent page ID from squads/*.md."""
+    default = SQUAD_CONFLUENCE_DEFAULTS.get(key or "")
+    if default and default.get("parent_page_id"):
+        return default["parent_page_id"]
     path = _squad_config_path(key)
     if not path or not path.exists():
         return ""
@@ -1403,21 +1417,25 @@ def _push_release_notes(content, squad_key, inputs):
 
 
 def _push_doc_pvg(content, squad_key, inputs):
-    # Squad key may have been inferred from product_area only for legacy UFRF2-based drafts.
-    _push_meta = inputs.get("_push_meta", {})
-    effective_squad = _push_meta.get("doc_pvg_squad_key") or squad_key
+    # PVGs default to the Flow Studio & Integrations squad.
+    effective_squad = DEFAULT_PVG_SQUAD_KEY
+    conf_defaults   = SQUAD_CONFLUENCE_DEFAULTS.get(effective_squad, {})
     squad_name      = _squad_name(effective_squad)
     feature_title   = extract_title(content, "PVG")
-    parent_page_id  = _squad_conf_parent_page_id(effective_squad)
+    parent_page_id  = conf_defaults.get("parent_page_id") or _squad_conf_parent_page_id(effective_squad)
+    space_key       = conf_defaults.get("space_key", "UPP")
+    space_id        = conf_defaults.get("space_id")
 
     yield "Creating PVG Confluence page…\n"
     if parent_page_id:
         yield f"Using {squad_name} Confluence parent page: {parent_page_id}\n"
     else:
         yield f"⚠ No confirmed Confluence parent page ID found for {squad_name}; publishing under UPP homepage.\n"
+    if space_id:
+        yield f"Using {squad_name} Confluence space ID: {space_id}\n"
     pvg_title = f"PVG — {feature_title}"
     yield "Using Confluence REST API v2: POST /wiki/api/v2/pages\n"
-    page      = _conf_create_page(pvg_title, "UPP", markdown_to_confluence(content), parent_page_id)
+    page      = _conf_create_page(pvg_title, space_key, markdown_to_confluence(content), parent_page_id, space_id)
     page_id   = page.get("id", "")
     page_url = conf_url(page_id)
     yield f"✓ PVG page created: {pvg_title}\n"
@@ -1754,6 +1772,8 @@ def api_push():
     data       = request.json or {}
     command_id = data.get("command_id", "")
     squad_key  = data.get("squad", session.get("squad", ""))
+    if command_id == "doc-pvg":
+        squad_key = DEFAULT_PVG_SQUAD_KEY
     content    = data.get("content", "").strip()
     inputs     = dict(data.get("inputs", {}))
     inputs["_push_fields"] = data.get("push_fields", {})

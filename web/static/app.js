@@ -78,8 +78,8 @@ const COMMANDS_DATA = [
   {
     "id": "doc-pvg", "name": "Generate PVG", "category": "Content",
     "mode": "generate", "jira_fetch": false, "slug": "/doc",
-    "needs_squad": true, "push_label": "Publish PVG to Confluence", "needs_backend": true,
-    "description": "Share feature context -> AI generates Product Value Guide -> publish to squad Confluence section",
+    "needs_squad": false, "default_squad": "JO", "push_label": "Publish PVG to Confluence", "needs_backend": true,
+    "description": "Share feature context -> AI generates Product Value Guide -> publish to Flow Studio Confluence section",
     "inputs": [
       {"id": "feature_context", "label": "Feature / initiative context",
        "type": "textarea", "required": true,
@@ -268,6 +268,10 @@ function apiUrl(path) {
 function _squadLabel(key) {
   const sq = state.squads.find(s => s.key === key);
   return sq ? `${sq.name} (${key})` : key || 'No squad selected';
+}
+
+function commandSquad(cmd) {
+  return cmd?.default_squad || state.currentSquad || "";
 }
 
 // ── Command icons & categories ─────────────────────────────────────────────
@@ -1117,8 +1121,9 @@ document.addEventListener("keydown", e => {
 async function startRun() {
   const cmd = state.activeCommand;
   if (!cmd || state.isRunning) return;
+  const effectiveSquad = commandSquad(cmd);
 
-  if (cmd.needs_squad && !state.currentSquad) {
+  if (cmd.needs_squad && !effectiveSquad) {
     squadSelect.classList.add("pulse-required");
     squadSelect.focus();
     return;
@@ -1146,7 +1151,7 @@ async function startRun() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         command_id: cmd.id,
-        squad:      state.currentSquad,
+        squad:      effectiveSquad,
         inputs:     gatherInputs(cmd),
       }),
     }).then(res => handleStream(res, "run")).catch(onStreamError);
@@ -1161,7 +1166,7 @@ async function startRun() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         command_id: cmd.id,
-        squad:      state.currentSquad,
+        squad:      effectiveSquad,
         inputs:     gatherInputs(cmd),
       }),
     }).then(res => handleStream(res, "run")).catch(onStreamError);
@@ -1186,7 +1191,7 @@ async function startRun() {
 
     const fetchParams = new URLSearchParams({
       command:     cmd.id,
-      squad_key:   state.currentSquad,
+      squad_key:   effectiveSquad,
       ...gatherInputs(cmd),
     });
 
@@ -1227,8 +1232,8 @@ async function startRun() {
     },
     body: JSON.stringify({
       command_id:      cmd.id,
-      squad_key:       state.currentSquad,
-      squad_label:     _squadLabel(state.currentSquad),
+      squad_key:       effectiveSquad,
+      squad_label:     _squadLabel(effectiveSquad),
       inputs:          gatherInputs(cmd),
       jira_context:    jiraContext,
       company_context: state.companyContext,
@@ -1541,6 +1546,7 @@ pushBtn.addEventListener("click", doPush);
 function doPush() {
   const cmd = state.activeCommand;
   if (!cmd || state.isRunning) return;
+  const effectiveSquad = commandSquad(cmd);
 
   const content = editTextarea.value.trim();
   if (!content) return;
@@ -1563,7 +1569,7 @@ function doPush() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       command_id:  cmd.id,
-      squad:       state.currentSquad,
+      squad:       effectiveSquad,
       content,
       inputs:      gatherInputs(cmd),
       push_fields: gatherPushFields(),
