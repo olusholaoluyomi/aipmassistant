@@ -1071,16 +1071,41 @@ def _createmeta(project_key, issue_type_name=None):
 def _resolve_issuetype(squad_key, preferred="Story", allow_fallback=True):
     """Return the best available issue type name from the project."""
     _, names = _createmeta(squad_key)
-    name_set = set(names)
-    if preferred in name_set:
-        return preferred
+    matched = next((name for name in names if name.strip().lower() == preferred.strip().lower()), None)
+    if matched:
+        return matched
     if not allow_fallback:
         available = ", ".join(names) if names else "none returned by Jira"
         raise RuntimeError(f"Issue type '{preferred}' is not available in project {squad_key}. Available types: {available}")
     for candidate in (preferred, "Story", "Task", "User Story"):
-        if candidate in name_set:
-            return candidate
+        matched = next((name for name in names if name.strip().lower() == candidate.lower()), None)
+        if matched:
+            return matched
     return names[0] if names else preferred
+
+
+def _resolve_issuetype_ref(squad_key, preferred="Story", allow_fallback=True):
+    """Return a Jira issuetype reference, preferring the exact issue type ID."""
+    path = f"/issue/createmeta?projectKeys={squad_key}&expand=projects.issuetypes"
+    try:
+        meta = jira_req("GET", path)
+        issue_types = meta.get("projects", [{}])[0].get("issuetypes", [])
+    except Exception:
+        issue_types = []
+
+    wanted = preferred.strip().lower()
+    matched = next((t for t in issue_types if (t.get("name") or "").strip().lower() == wanted), None)
+    if matched:
+        return {"id": str(matched["id"])} if matched.get("id") else {"name": matched.get("name", preferred)}
+    if not allow_fallback:
+        available = ", ".join(t.get("name", "") for t in issue_types) or "none returned by Jira"
+        raise RuntimeError(f"Issue type '{preferred}' is not available in project {squad_key}. Available types: {available}")
+
+    for candidate in ("Story", "Task", "User Story"):
+        matched = next((t for t in issue_types if (t.get("name") or "").strip().lower() == candidate.lower()), None)
+        if matched:
+            return {"id": str(matched["id"])} if matched.get("id") else {"name": matched.get("name", candidate)}
+    return {"name": preferred}
 
 
 def _fetch_create_meta(project_key, issue_type_name):
@@ -1128,6 +1153,19 @@ def _build_extra_fields(meta_fields, user_values):
     return extra
 
 
+def _apply_issue_defaults(extra, meta_fields, title):
+    """Fill predictable required Jira fields that should mirror the issue title."""
+    for field in meta_fields:
+        name = (field.get("name") or "").strip().lower()
+        if field["id"] in extra:
+            current = extra[field["id"]]
+            if current not in ("", None):
+                continue
+        if name in {"epic name", "name"} or "epic name" in name:
+            extra[field["id"]] = title[:120]
+    return extra
+
+
 def _extract_epic_title(content):
     """Prefer an explicit Epic heading/summary over generic section names."""
     for line in content.splitlines():
@@ -1157,8 +1195,21 @@ def _extract_suggested_stories(content):
         section = section[:next_section.start()]
 
     stories = []
-    heading_pat = re.compile(r"^###\s+(?:(?:User\s+)?Story\s*\d*\s*[:.\-]\s*)?(.+?)\s*$", re.I | re.M)
+    heading_pat = re.compile(r"^(?:#{1,4}\s*)?(?:(?:User\s+)?Story\s*\d+\s*[:.\-]\s*)(.+?)\s*$", re.I | re.M)
     matches = list(heading_pat.finditer(section))
+    for idx, item in enumerate(matches):
+        title = item.group(1).strip()
+        start = item.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(section)
+        body = section[start:end].strip()
+        if title:
+            stories.append({"title": title[:120], "body": body or title})
+
+    if stories:
+        return stories
+
+    generic_heading_pat = re.compile(r"^###\s+(.+?)\s*$", re.I | re.M)
+    matches = list(generic_heading_pat.finditer(section))
     for idx, item in enumerate(matches):
         title = item.group(1).strip()
         start = item.end()
@@ -1219,19 +1270,21 @@ def _link_story_to_epic(child_key, epic_key):
 def _push_story(content, squad_key, inputs):
     title       = _extract_epic_title(content)
     epic_type   = _resolve_issuetype(squad_key, "Epic", allow_fallback=False)
+    epic_type_ref = _resolve_issuetype_ref(squad_key, "Epic", allow_fallback=False)
     meta_fields = _fetch_create_meta(squad_key, epic_type)
     user_vals   = inputs.get("_push_fields", {})
     extra       = _build_extra_fields(meta_fields, user_vals)
-    yield f"Creating Jira {epic_type} in {squad_key}…\n"
+    extra       = _apply_issue_defaults(extra, meta_fields, title)
+    yield f"Creating Jira EPIC in {squad_key}…\n"
     result = jira_req("POST", "/issue", json={"fields": {
         "project":     {"key": squad_key},
         "summary":     title,
         "description": markdown_to_adf(content),
-        "issuetype":   {"name": epic_type},
+        "issuetype":   epic_type_ref,
         **extra,
     }})
     epic_key = result.get("key", "")
-    yield f"✓ {epic_type} created: {epic_key}\n"
+    yield f"✓ EPIC created: {epic_key}\n"
     if epic_key:
         yield f"{jira_url(epic_key)}\n"
 
@@ -1243,18 +1296,20 @@ def _push_story(content, squad_key, inputs):
         return
 
     story_type = _resolve_issuetype(squad_key, "Story")
+    story_type_ref = _resolve_issuetype_ref(squad_key, "Story")
     story_meta = _fetch_create_meta(squad_key, story_type)
     story_extra = _build_extra_fields(story_meta, user_vals)
-    yield f"\nCreating {len(stories)} approved {story_type} issue(s) under {epic_key}…\n"
     for idx, story in enumerate(stories, start=1):
         story_title = str(story.get("title", "")).strip()[:120]
         story_body  = str(story.get("body", "")).strip() or story_title
+        story_fields_extra = _apply_issue_defaults(dict(story_extra), story_meta, story_title)
+        yield f"\nCreating Jira {story_type} {idx} in {squad_key}…\n"
         fields = {
             "project":     {"key": squad_key},
             "summary":     story_title,
             "description": markdown_to_adf(story_body),
-            "issuetype":   {"name": story_type},
-            **story_extra,
+            "issuetype":   story_type_ref,
+            **story_fields_extra,
         }
         parent_payload = _story_parent_fields(squad_key, story_type, epic_key) if epic_key else {}
         fields.update(parent_payload)
@@ -1272,10 +1327,13 @@ def _push_story(content, squad_key, inputs):
                 else:
                     yield f"  {idx}. ⚠ Created but could not link to Epic: {link_error}\n"
             if child_key:
-                yield f"  {idx}. ✓ {story_type} created: {child_key} - {jira_url(child_key)}\n"
+                yield f"✓ {story_type} {idx} created: {child_key}\n"
+                yield f"{jira_url(child_key)}\n"
             continue
         child_key = issue.get("key", "")
-        yield f"  {idx}. ✓ {story_type} created: {child_key} - {jira_url(child_key)}\n"
+        yield f"✓ {story_type} {idx} created: {child_key}\n"
+        if child_key:
+            yield f"{jira_url(child_key)}\n"
 
 
 def _push_doc_feature(content, squad_key, inputs):
