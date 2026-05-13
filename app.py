@@ -65,6 +65,7 @@ ATLASSIAN_SCOPES = " ".join([
     "read:jira-user",
     "read:confluence-content.all",
     "write:confluence-content",
+    "read:page:confluence",
     "read:space:confluence",
     "write:page:confluence",
     "offline_access",
@@ -72,6 +73,7 @@ ATLASSIAN_SCOPES = " ".join([
 ])
 
 TOKENS_FILE = PROJECT_ROOT / ".atlassian_tokens.json"
+REQUIRED_CONFLUENCE_V2_SCOPES = {"write:page:confluence"}
 
 
 def load_tokens():
@@ -90,6 +92,16 @@ def save_tokens(tokens):
 def clear_tokens():
     if TOKENS_FILE.exists():
         TOKENS_FILE.unlink()
+
+
+def _token_scopes(tokens=None):
+    tokens = tokens or load_tokens() or {}
+    scope_text = tokens.get("scope", "") or ""
+    return {s for s in scope_text.split() if s}
+
+
+def _missing_scopes(required):
+    return sorted(set(required) - _token_scopes())
 
 
 def _do_refresh(refresh_token):
@@ -175,6 +187,12 @@ def _atlassian_error(r, system="Jira"):
         msg = " | ".join(parts) if parts else json.dumps(body)[:300]
     except Exception:
         msg = r.text[:300]
+    if r.status_code == 401 and system == "Confluence" and "scope" in msg.lower():
+        missing = _missing_scopes(REQUIRED_CONFLUENCE_V2_SCOPES)
+        suffix = f" Missing scope(s): {', '.join(missing)}." if missing else ""
+        return (f"{system} 401 Unauthorized — the saved Atlassian OAuth token does not include the "
+                f"Confluence v2 page-write scope.{suffix} Disconnect, then reconnect Atlassian so the app "
+                f"can request the updated scopes. Detail: {msg}")
     if r.status_code == 403:
         return (f"{system} 403 Forbidden — your OAuth token may be missing write scopes. "
                 f"Click your name in the header → Disconnect, then reconnect Jira. Detail: {msg}")
@@ -1435,6 +1453,11 @@ def _push_doc_pvg(content, squad_key, inputs):
         yield f"Using {squad_name} Confluence space ID: {space_id}\n"
     pvg_title = f"PVG — {feature_title}"
     yield "Using Confluence REST API v2: POST /wiki/api/v2/pages\n"
+    missing_scopes = _missing_scopes(REQUIRED_CONFLUENCE_V2_SCOPES)
+    if missing_scopes:
+        yield ("❌ Atlassian token is missing Confluence v2 scope(s): "
+               f"{', '.join(missing_scopes)}. Disconnect and reconnect Atlassian, then try again.\n")
+        return
     page      = _conf_create_page(pvg_title, space_key, markdown_to_confluence(content), parent_page_id, space_id)
     page_id   = page.get("id", "")
     page_url = conf_url(page_id)
@@ -1605,6 +1628,7 @@ def api_auth_status():
                 "picture": user.get("picture", ""),
             },
             "cloud_url": tokens.get("cloud_url", ""),
+            "missing_confluence_v2_scopes": _missing_scopes(REQUIRED_CONFLUENCE_V2_SCOPES),
         })
     except Exception:
         return jsonify({"connected": True, "user": {"name": "Connected"}})
