@@ -293,7 +293,6 @@ def _conf_create_page(title, space_key, body_html, parent_id=None, space_id=None
         "status":  "current",
         "title":   title,
         "body":    {"representation": "storage", "value": body_html},
-        "subtype": "live",
     }
     parent_id = parent_id or _conf_space_homepage(space_key)
     if parent_id:
