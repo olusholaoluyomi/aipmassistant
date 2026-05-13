@@ -206,20 +206,6 @@ def agile_req(method, path, **kwargs):
     return r.json() if r.content else {}
 
 
-def conf_req(method, path, **kwargs):
-    cloud_id, _ = get_cloud_info()
-    if not cloud_id:
-        raise RuntimeError("Could not get Atlassian cloud ID.")
-    url     = f"https://api.atlassian.com/ex/confluence/{cloud_id}/wiki/rest/api{path}"
-    headers = _auth_headers()
-    if method.upper() in ("POST", "PUT", "PATCH"):
-        headers["Content-Type"] = "application/json"
-    r = http.request(method, url, headers=headers, timeout=30, **kwargs)
-    if not r.ok:
-        raise RuntimeError(_atlassian_error(r, "Confluence"))
-    return r.json() if r.content else {}
-
-
 def conf_v2_req(method, path, **kwargs):
     cloud_id, _ = get_cloud_info()
     if not cloud_id:
@@ -230,7 +216,7 @@ def conf_v2_req(method, path, **kwargs):
         headers["Content-Type"] = "application/json"
     r = http.request(method, url, headers=headers, timeout=30, **kwargs)
     if not r.ok:
-        raise RuntimeError(_atlassian_error(r, "Confluence"))
+        raise RuntimeError(f"{_atlassian_error(r, 'Confluence')} [endpoint: {method.upper()} /wiki/api/v2{path}]")
     return r.json() if r.content else {}
 
 
@@ -1430,6 +1416,7 @@ def _push_doc_pvg(content, squad_key, inputs):
     else:
         yield f"⚠ No confirmed Confluence parent page ID found for {squad_name}; publishing under UPP homepage.\n"
     pvg_title = f"PVG — {feature_title}"
+    yield "Using Confluence REST API v2: POST /wiki/api/v2/pages\n"
     page      = _conf_create_page(pvg_title, "UPP", markdown_to_confluence(content), parent_page_id)
     page_id   = page.get("id", "")
     page_url = conf_url(page_id)
