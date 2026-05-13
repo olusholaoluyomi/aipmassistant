@@ -1157,7 +1157,7 @@ def _extract_suggested_stories(content):
         section = section[:next_section.start()]
 
     stories = []
-    heading_pat = re.compile(r"^###\s+(?:Story\s*\d+\s*[:.\-]\s*)?(.+?)\s*$", re.I | re.M)
+    heading_pat = re.compile(r"^###\s+(?:(?:User\s+)?Story\s*\d*\s*[:.\-]\s*)?(.+?)\s*$", re.I | re.M)
     matches = list(heading_pat.finditer(section))
     for idx, item in enumerate(matches):
         title = item.group(1).strip()

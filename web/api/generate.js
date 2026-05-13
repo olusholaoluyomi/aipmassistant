@@ -6,55 +6,68 @@ const GENERIC_CONTEXT = "You are an experienced product manager. Be specific, pr
 // Instruction-only strings (persona is injected from company_context at request time)
 const PROMPTS = {
   daily: {
-    instructions: `Generate a concise daily standup digest for a product squad. Use the live sprint data provided.
+    instructions: `Generate a concise daily standup digest for a product squad. Use the live sprint data and meeting notes provided.
 
 Output format:
-## Sprint Health
-[1-2 sentences: overall sprint progress and risk level]
+## Daily Standup Digest - [DATE]
 
-## In Progress
-[bullet list of what's actively being worked on, with ticket keys]
+### Sprint Progress
+| Ticket | Title | Status | Owner | Notes |
+|---|---|---|---|---|
 
-## Blockers & Risks
-[bullet list — or "None identified"]
+### Decisions Made
+- [decision]
 
-## Decisions Needed
-[items requiring PM attention — or "None"]
+### Blockers
+| Ticket | Blocker | Owner | Days Blocked |
+|---|---|---|---|
 
-## Today's Focus
-[2-3 recommended priorities based on the sprint data]
+### Action Items
+| Action | Owner | Due |
+|---|---|---|
 
-Keep it short and actionable. PMs read this in under 60 seconds.`,
+### Needs PM Decision
+- [item if any]
+
+Use "None" where a section has no items. Keep notes short and action-oriented.`,
     user: (squad, inputs, context) =>
       `Squad: ${squad}\n\nSprint Data:\n${context || "No sprint data available."}\n\n${inputs.notes ? "Meeting Notes:\n" + inputs.notes + "\n" : ""}`,
     maxTokens: 3000,
   },
 
   "sprint-analysis": {
-    instructions: `Analyze the sprint data and produce an actionable sprint health report. Flag issues clearly and recommend specific actions.
+    instructions: `Analyze the sprint data and produce a follow-up report for the PM. Flag stale, blocked, and unassigned work clearly and recommend specific actions.
 
 Output format:
-## Sprint Summary
-[Sprint name, total issues, completion %, days remaining if available]
+## Follow-up Report - [DATE]
 
-## ⚠ Issues Requiring Attention
-[List each problem with ticket key, what's wrong, and recommended action]
-Use these categories: STALE (no updates 3+ days), BLOCKED, UNASSIGNED, OVERDUE, MISSING POINTS
+### Stale Tickets (No update in 3+ days)
+| Ticket | Title | Assignee | Days Since Update | Status |
+|---|---|---|---|---|
 
-## DoR/DoD Violations
-[Tickets that appear to violate Definition of Ready or Done — or "None"]
+### Blocked Tickets
+| Ticket | Title | Blocker Description | Owner | Action Needed |
+|---|---|---|---|---|
 
-## Recommended Actions
-[Numbered list of specific PM actions to take today]
+### Unassigned Tickets
+| Ticket | Title | Priority | Sprint |
+|---|---|---|---|
 
-Be direct. Skip the fluffy preamble.`,
+### Recommended Actions
+| Priority | Action | Owner |
+|---|---|---|
+
+### Needs PM Decision
+- [items requiring PM input]
+
+Use "None" in empty tables or lists. Be direct. Skip the fluffy preamble.`,
     user: (squad, inputs, context) =>
       `Squad: ${squad}\n\nSprint Data:\n${context || "No sprint data available."}`,
     maxTokens: 3000,
   },
 
   story: {
-    instructions: `Write a Jira Epic with a short list of implementation-ready child Stories. Be specific and professional. Use business language. Keep acceptance criteria precise and testable.
+    instructions: `Write a Jira Epic with a short list of implementation-ready child User Stories. Be specific and professional. Use business language. Keep acceptance criteria precise and testable.
 
 Output format:
 ## Epic: [clear Epic title]
@@ -73,33 +86,55 @@ Output format:
 [Epic-level acceptance criteria]
 
 ## Suggested Stories
-### Story 1: [short Story title]
-[One-sentence purpose]
+### User Story: [Title - Verb + Object + Context]
+
+**As a** [user type]
+**I want to** [action]
+**So that** [outcome]
 
 #### Acceptance Criteria
-[Story-level acceptance criteria]
+- Given [context], when [action], then [result]
+- Given [context], when [action], then [result]
+- Given [context], when [action], then [result]
+- (minimum 3, maximum 5)
 
-#### Notes
-[Dependencies, edge cases, story point estimate, or technical notes when requested]
+#### Definition of Done
+- [ ] Code Complete: Feature/bug is coded
+- [ ] Code Review: Complete & approved
+- [ ] Documentation: Technical and user docs updated
+- [ ] Unit & Integration Tests: Implemented and passing
+- [ ] Acceptance Testing (Local): TestRail cases executed locally and passed
+- [ ] Acceptance Testing (Integration/Pre-Prod): Deployed and all acceptance tests pass
+- [ ] Automated Coverage: API/E2E tests committed and passing in CI pipeline
+- [ ] Production Verification: Smoke-tested on production
 
-Repeat for 3-6 small Stories that can be individually approved and created under the Epic.`,
+#### Story Points
+Estimate: [1/2/3/5/8/13] - Rationale: [brief reason]
+
+#### Dependencies
+- [dependency or "None"]
+
+#### Labels
+[epic-label], [squad-label]
+
+Repeat for 3-6 small User Stories that can be individually approved and created under the Epic.`,
     user: (squad, inputs) => {
       const acFormat = inputs.ac_format || "gherkin";
       const extras = (inputs.extras || "story_points,dependencies").split(",").map(s => s.trim()).filter(Boolean);
       const acFormats = {
-        "gherkin":    "Gherkin format:\n- **Given** [context], **When** [action], **Then** [expected result]",
+        "gherkin":    "Gherkin format:\n- Given [context], when [action], then [result]",
         "checklist":  "Checklist format:\n- [ ] [acceptance criterion]",
-        "test-cases": "Numbered test cases:\n1. [Scenario] -> **Expected:** [result]",
+        "test-cases": "Numbered test cases:\n1. [Scenario] -> Expected: [result]",
       };
       const acInstruction = acFormats[acFormat] || acFormats["gherkin"];
       const extrasText = [];
-      if (extras.includes("edge_cases"))      extrasText.push("Call out edge cases in the relevant Story notes.");
-      if (extras.includes("story_points"))    extrasText.push("Add a small Story point estimate to each Story note.");
-      if (extras.includes("dependencies"))    extrasText.push("List dependencies in the relevant Story notes, or write \"None\".");
-      if (extras.includes("technical_notes")) extrasText.push("Add implementation notes where useful.");
-      return `Squad: ${squad}\n\nFeature / initiative: ${inputs.description || ""}\n\nAcceptance criteria style: ${acInstruction}\n\nStory guidance:\n- Suggest 3-6 small Stories under the Epic.\n- Each Story should be independently shippable or testable.\n- Keep Story titles short and action-oriented.\n${extrasText.map(x => "- " + x).join("\n")}`;
+      if (extras.includes("edge_cases"))      extrasText.push("Call out edge cases inside the relevant acceptance criteria.");
+      if (extras.includes("story_points"))    extrasText.push("Include Story Points for every User Story.");
+      if (extras.includes("dependencies"))    extrasText.push("Include Dependencies for every User Story, or write \"None\".");
+      if (extras.includes("technical_notes")) extrasText.push("Add technical notes only when they clarify delivery without turning the story into a technical spec.");
+      return `Squad: ${squad}\n\nFeature / initiative: ${inputs.description || ""}\n\nAcceptance criteria style: ${acInstruction}\n\nStory guidance:\n- Suggest 3-6 small User Stories under the Epic.\n- Each User Story should be independently shippable or testable.\n- Keep User Story titles short and action-oriented.\n- Include the full Definition of Done checklist in each User Story.\n${extrasText.map(x => "- " + x).join("\n")}`;
     },
-    maxTokens: 4096,
+    maxTokens: 5000,
   },
 
   "release-notes": {

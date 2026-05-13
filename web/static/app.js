@@ -1443,7 +1443,7 @@ function parseSuggestedStories(content) {
   const next = section.search(/^##\s+/m);
   if (next >= 0) section = section.slice(0, next);
 
-  const headingPat = /^###\s+(?:Story\s*\d+\s*[:.\-]\s*)?(.+?)\s*$/gim;
+  const headingPat = /^###\s+(?:(?:User\s+)?Story\s*\d*\s*[:.\-]\s*)?(.+?)\s*$/gim;
   const matches = [...section.matchAll(headingPat)];
   if (matches.length) {
     return matches.map((m, idx) => {
