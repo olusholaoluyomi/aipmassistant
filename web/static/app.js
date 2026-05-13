@@ -78,8 +78,8 @@ const COMMANDS_DATA = [
   {
     "id": "doc-pvg", "name": "Generate PVG", "category": "Content",
     "mode": "generate", "jira_fetch": false, "slug": "/doc",
-    "needs_squad": true, "push_label": "Publish PVG + Create Epic", "needs_backend": true,
-    "description": "Share feature context -> AI generates Product Value Guide -> publish to Confluence + create Epic",
+    "needs_squad": true, "push_label": "Publish PVG to Confluence", "needs_backend": true,
+    "description": "Share feature context -> AI generates Product Value Guide -> publish to squad Confluence section",
     "inputs": [
       {"id": "feature_context", "label": "Feature / initiative context",
        "type": "textarea", "required": true,
@@ -1362,7 +1362,7 @@ function showEditPanel() {
     pushBtn.classList.remove("hidden");
     editHint.style.display = "none";
     regenerateBtn.classList.remove("hidden");
-    if (["story", "idea", "doc-pvg"].includes(cmd.id) && state.currentSquad && state.backendConnected) {
+    if (["story", "idea"].includes(cmd.id) && state.currentSquad && state.backendConnected) {
       loadPushFields(cmd.id, state.currentSquad);
     }
     renderStoryApprovals();

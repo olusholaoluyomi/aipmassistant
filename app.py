@@ -65,6 +65,8 @@ ATLASSIAN_SCOPES = " ".join([
     "read:jira-user",
     "read:confluence-content.all",
     "write:confluence-content",
+    "read:space:confluence",
+    "write:page:confluence",
     "offline_access",
     "read:me",
 ])
@@ -282,6 +284,7 @@ def _conf_create_page(title, space_key, body_html, parent_id=None):
     if parent_id:
         payload["parentId"] = str(parent_id)
     return conf_v2_req("POST", "/pages", json=payload)
+
 
 def jira_url(key):
     _, cloud_url = get_cloud_info()
@@ -615,8 +618,8 @@ COMMANDS = [
     {
         "id": "doc-pvg", "name": "Generate PVG", "category": "Content",
         "mode": "generate", "jira_fetch": False, "slug": "/doc",
-        "needs_squad": True, "push_label": "Publish PVG + Create Epic",
-        "description": "Share feature context → AI generates Product Value Guide → publish to Confluence + create Epic",
+        "needs_squad": True, "push_label": "Publish PVG to Confluence",
+        "description": "Share feature context → AI generates Product Value Guide → publish to squad Confluence section",
         "inputs": [
             {"id": "feature_context", "label": "Feature / initiative context",
              "type": "textarea", "required": True,
@@ -1417,7 +1420,6 @@ def _push_doc_pvg(content, squad_key, inputs):
     # Squad key may have been inferred from product_area only for legacy UFRF2-based drafts.
     _push_meta = inputs.get("_push_meta", {})
     effective_squad = _push_meta.get("doc_pvg_squad_key") or squad_key
-    ufrf2_key       = _push_meta.get("doc_pvg_issue_key", "")
     squad_name      = _squad_name(effective_squad)
     feature_title   = extract_title(content, "PVG")
     parent_page_id  = _squad_conf_parent_page_id(effective_squad)
@@ -1432,49 +1434,7 @@ def _push_doc_pvg(content, squad_key, inputs):
     page_id   = page.get("id", "")
     page_url = conf_url(page_id)
     yield f"✓ PVG page created: {pvg_title}\n"
-    yield f"{page_url}\n\n"
-
-    if effective_squad:
-        epic_type   = _resolve_issuetype(effective_squad, "Epic")
-        meta_fields = _fetch_create_meta(effective_squad, epic_type)
-        user_vals   = inputs.get("_push_fields", {})
-        extra       = _build_extra_fields(meta_fields, user_vals)
-        yield f"Creating {epic_type} in {squad_name} ({effective_squad})…\n"
-        epic = jira_req("POST", "/issue", json={"fields": {
-            "project":     {"key": effective_squad},
-            "summary":     feature_title,
-            "description": markdown_to_adf(f"PVG: {page_url}"),
-            "issuetype":   {"name": epic_type},
-            **extra,
-        }})
-        epic_key = epic.get("key", "")
-        yield f"✓ Epic created: {epic_key}\n"
-        yield f"{jira_url(epic_key)}\n\n"
-
-        # Link Epic to UFRF2 item
-        if ufrf2_key and epic_key:
-            yield f"Linking {ufrf2_key} → {epic_key}…\n"
-            try:
-                jira_req("POST", "/issueLink", json={
-                    "type":         {"id": "10413"},
-                    "inwardIssue":  {"key": epic_key},
-                    "outwardIssue": {"key": ufrf2_key},
-                })
-                yield f"✓ Linked\n"
-            except Exception as e:
-                yield f"⚠ Could not create Polaris link: {e}\n"
-
-        # Comment on Epic with page link
-        if epic_key and page_id:
-            try:
-                jira_req("POST", f"/issue/{epic_key}/comment", json={
-                    "body": markdown_to_adf(f"PVG published: {page_url}")
-                })
-                yield f"✓ Comment added to {epic_key} with PVG link\n"
-            except Exception:
-                pass
-    else:
-        yield "⚠ No squad determined — skipped Epic creation. Select a squad and re-push if needed.\n"
+    yield f"{page_url}\n"
 
 
 def _push_rfo(content, squad_key, inputs):
@@ -1705,7 +1665,6 @@ def api_push_fields(command_id, squad_key):
     COMMAND_ISSUE_MAP = {
         "story":   (squad_key, "Epic"),
         "idea":    ("UFRF2",   "Idea"),
-        "doc-pvg": (squad_key, "Epic"),
     }
     if command_id not in COMMAND_ISSUE_MAP:
         return jsonify({"fields": []})
