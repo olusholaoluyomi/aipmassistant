@@ -1456,7 +1456,7 @@ function parseSuggestedStories(content) {
       const end = idx + 1 < matches.length ? matches[idx + 1].index : section.length;
       return {
         id: `story-${idx}`,
-        title: m[1].trim(),
+        title: stripIssueTitlePrefix(m[1]),
         body: section.slice(start, end).trim() || m[1].trim(),
       };
     }).filter(s => s.title);
@@ -1470,7 +1470,7 @@ function parseSuggestedStories(content) {
       const end = idx + 1 < genericMatches.length ? genericMatches[idx + 1].index : section.length;
       return {
         id: `story-${idx}`,
-        title: m[1].trim(),
+        title: stripIssueTitlePrefix(m[1]),
         body: section.slice(start, end).trim() || m[1].trim(),
       };
     }).filter(s => s.title);
@@ -1479,10 +1479,18 @@ function parseSuggestedStories(content) {
   return section.split("\n")
     .map((line, idx) => ({
       id: `story-${idx}`,
-      title: line.replace(/^[-*]\s+(?:\[[ x]\]\s*)?/i, "").trim(),
+      title: stripIssueTitlePrefix(line.replace(/^[-*]\s+(?:\[[ x]\]\s*)?/i, "").trim()),
       body: line.replace(/^[-*]\s+(?:\[[ x]\]\s*)?/i, "").trim(),
     }))
     .filter(s => s.title);
+}
+
+function stripIssueTitlePrefix(title) {
+  return String(title || "")
+    .trim()
+    .replace(/^[#*\s]+|[*\s]+$/g, "")
+    .replace(/^(?:Epic|User\s+Story)(?:\s*\d+)?\s*[:.\-]\s*/i, "")
+    .trim();
 }
 
 function renderStoryApprovals() {

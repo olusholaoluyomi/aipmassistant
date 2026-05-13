@@ -330,6 +330,13 @@ def extract_title(content, fallback="Untitled"):
     return fallback
 
 
+def _strip_issue_title_prefix(title):
+    """Remove generated issue-type labels from Jira summaries."""
+    title = re.sub(r"^[#*\s]+|[*\s]+$", "", str(title or "").strip())
+    title = re.sub(r"^(?:Epic|User\s+Story)(?:\s*\d+)?\s*[:.\-]\s*", "", title, flags=re.I)
+    return title.strip()[:120]
+
+
 def _inline_adf(text):
     """Parse inline markdown (bold, italic, code) into a list of ADF text nodes."""
     nodes = []
@@ -1227,16 +1234,72 @@ def _extract_epic_title(content):
         s = line.strip()
         m = re.match(r"^#{1,3}\s*Epic\s*[:\-]\s*(.+)$", s, re.I)
         if m:
-            return m.group(1).strip()[:120]
+            return _strip_issue_title_prefix(m.group(1))
     for line in content.splitlines():
         s = line.strip()
         m = re.match(r"^\*\*Epic Summary\*\*\s*[:\-]\s*(.+)$", s, re.I)
         if m:
-            return m.group(1).strip()[:120]
+            return _strip_issue_title_prefix(m.group(1))
         m = re.match(r"^Epic Summary\s*[:\-]\s*(.+)$", s, re.I)
         if m:
-            return m.group(1).strip()[:120]
-    return extract_title(content, "Epic")
+            return _strip_issue_title_prefix(m.group(1))
+    return _strip_issue_title_prefix(extract_title(content, "Epic"))
+
+
+def _markdown_heading(line):
+    match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line.strip())
+    if not match:
+        return None, ""
+    title = re.sub(r"[*_`]+", "", match.group(2)).strip()
+    return len(match.group(1)), title
+
+
+def _extract_epic_description(content):
+    """Keep the Epic ticket focused; child Story detail lives on child tickets."""
+    wanted = {"business outcome", "scope", "non-goals", "acceptance criteria"}
+    lines = content.splitlines()
+    out = []
+    include = False
+    include_level = 99
+
+    for line in lines:
+        level, heading = _markdown_heading(line)
+        normalized = heading.lower().rstrip(":")
+
+        if re.match(r"^\s*\*\*Epic Summary\*\*\s*[:\-]", line, re.I):
+            summary = re.sub(r"^\s*\*\*Epic Summary\*\*\s*[:\-]\s*", "", line, flags=re.I).strip()
+            out.extend(["## Epic Summary", summary, ""])
+            include = False
+            continue
+        if re.match(r"^\s*Epic Summary\s*[:\-]", line, re.I):
+            summary = re.sub(r"^\s*Epic Summary\s*[:\-]\s*", "", line, flags=re.I).strip()
+            out.extend(["## Epic Summary", summary, ""])
+            include = False
+            continue
+
+        if level:
+            if normalized in {"suggested stories", "user stories", "implementation roadmap", "roadmap"}:
+                include = False
+                include_level = 99
+                continue
+            if normalized in wanted:
+                include = True
+                include_level = level
+                out.append(line)
+                continue
+            if include and level <= include_level:
+                include = False
+                include_level = 99
+
+        if include:
+            out.append(line)
+
+    description = "\n".join(out).strip()
+    if description:
+        return description
+
+    before_stories = re.split(r"^##\s+Suggested Stories\s*$", content, maxsplit=1, flags=re.I | re.M)[0]
+    return before_stories.strip() or content
 
 
 def _extract_suggested_stories(content):
@@ -1253,7 +1316,7 @@ def _extract_suggested_stories(content):
     heading_pat = re.compile(r"^(?:#{1,4}\s*)?(?:(?:User\s+)?Story\s*\d+\s*[:.\-]\s*)(.+?)\s*$", re.I | re.M)
     matches = list(heading_pat.finditer(section))
     for idx, item in enumerate(matches):
-        title = item.group(1).strip()
+        title = _strip_issue_title_prefix(item.group(1))
         start = item.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(section)
         body = section[start:end].strip()
@@ -1266,7 +1329,7 @@ def _extract_suggested_stories(content):
     generic_heading_pat = re.compile(r"^###\s+(.+?)\s*$", re.I | re.M)
     matches = list(generic_heading_pat.finditer(section))
     for idx, item in enumerate(matches):
-        title = item.group(1).strip()
+        title = _strip_issue_title_prefix(item.group(1))
         start = item.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(section)
         body = section[start:end].strip()
@@ -1278,6 +1341,7 @@ def _extract_suggested_stories(content):
 
     for line in section.splitlines():
         s = re.sub(r"^[-*]\s+(?:\[[ xX]\]\s*)?", "", line.strip())
+        s = _strip_issue_title_prefix(s)
         if s:
             stories.append({"title": s[:120], "body": s})
     return stories
@@ -1324,6 +1388,7 @@ def _link_story_to_epic(child_key, epic_key):
 
 def _push_story(content, squad_key, inputs):
     title       = _extract_epic_title(content)
+    epic_body   = _extract_epic_description(content)
     epic_type   = _resolve_issuetype(squad_key, "Epic", allow_fallback=False)
     epic_type_ref = _resolve_issuetype_ref(squad_key, "Epic", allow_fallback=False)
     meta_fields = _fetch_create_meta(squad_key, epic_type)
@@ -1334,7 +1399,7 @@ def _push_story(content, squad_key, inputs):
     result = jira_req("POST", "/issue", json={"fields": {
         "project":     {"key": squad_key},
         "summary":     title,
-        "description": markdown_to_adf(content),
+        "description": markdown_to_adf(epic_body),
         "issuetype":   epic_type_ref,
         **extra,
     }})
@@ -1355,7 +1420,7 @@ def _push_story(content, squad_key, inputs):
     story_meta = _fetch_create_meta(squad_key, story_type)
     story_extra = _build_extra_fields(story_meta, user_vals)
     for idx, story in enumerate(stories, start=1):
-        story_title = str(story.get("title", "")).strip()[:120]
+        story_title = _strip_issue_title_prefix(story.get("title", ""))
         story_body  = str(story.get("body", "")).strip() or story_title
         story_fields_extra = _apply_issue_defaults(dict(story_extra), story_meta, story_title)
         yield f"\nCreating Jira {story_type} {idx} in {squad_key}…\n"

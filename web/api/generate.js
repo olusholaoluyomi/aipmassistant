@@ -70,7 +70,7 @@ Use "None" in empty tables or lists. Be direct. Skip the fluffy preamble.`,
     instructions: `Write a Jira Epic with a short list of implementation-ready child User Stories. Be specific and professional. Use business language. Keep acceptance criteria precise and testable.
 
 Output format:
-## Epic: [clear Epic title]
+## [Clear Epic title]
 **Epic Summary:** [one sentence]
 
 ### Business Outcome
@@ -86,7 +86,7 @@ Output format:
 [Epic-level acceptance criteria]
 
 ## Suggested Stories
-### User Story: [Title - Verb + Object + Context]
+### [Title - Verb + Object + Context]
 
 **As a** [user type]
 **I want to** [action]
