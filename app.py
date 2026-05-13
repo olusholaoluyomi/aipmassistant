@@ -234,15 +234,15 @@ def _conf_space_homepage(space_key):
         return None
 
 
-def _conf_create_page(title, space_key, body_html):
-    """Create a Confluence page, using the space homepage as parent."""
+def _conf_create_page(title, space_key, body_html, parent_id=None):
+    """Create a Confluence page, using an explicit parent or the space homepage."""
     payload = {
         "type":  "page",
         "title": title,
         "space": {"key": space_key},
         "body":  {"storage": {"value": body_html, "representation": "storage"}},
     }
-    parent_id = _conf_space_homepage(space_key)
+    parent_id = parent_id or _conf_space_homepage(space_key)
     if parent_id:
         payload["ancestors"] = [{"id": parent_id}]
     return conf_req("POST", "/content", json=payload)
@@ -487,17 +487,17 @@ def build_adf_comment(text, mention_ids=None):
 # ---------------------------------------------------------------------------
 
 SQUADS = [
-    {"key": "PMRKT", "name": "Campaigns & CDP"},
-    {"key": "CON",   "name": "Business Messaging"},
-    {"key": "SMS",   "name": "SMS Unified"},
-    {"key": "VC",    "name": "Voice"},
-    {"key": "JO",    "name": "Flow Studio & Integrations"},
-    {"key": "CB",    "name": "Agent Console"},
-    {"key": "AIS",   "name": "Conversational AI"},
-    {"key": "ACX",   "name": "Agentic CX"},
-    {"key": "UCCC",  "name": "UC Platform"},
-    {"key": "CI",    "name": "Customer Insights"},
-    {"key": "DENG",  "name": "Data Engineering"},
+    {"key": "PMRKT", "name": "Campaigns & CDP",            "config": "Campaigns and CDP.md"},
+    {"key": "CON",   "name": "Business Messaging",         "config": "Business Messaging.md"},
+    {"key": "SMS",   "name": "SMS Unified",                "config": "SMS.md"},
+    {"key": "VC",    "name": "Voice",                      "config": "Voice.md"},
+    {"key": "JO",    "name": "Flow Studio & Integrations", "config": "Flow Studio and Integrations.md"},
+    {"key": "CB",    "name": "Agent Console",              "config": "Agent Console.md"},
+    {"key": "AIS",   "name": "Conversational AI",          "config": "Conversational AI.md"},
+    {"key": "ACX",   "name": "Agentic CX",                 "config": "Agentic CX.md"},
+    {"key": "UCCC",  "name": "UC Platform",                "config": "UC Platform.md"},
+    {"key": "CI",    "name": "Customer Insights",          "config": "Customer Insights.md"},
+    {"key": "DENG",  "name": "Data Engineering",           "config": "Data Engineering.md"},
 ]
 
 # Product Area field value → squad key (used by doc-pvg)
@@ -736,6 +736,29 @@ COMMANDS_MAP = {c["id"]: c for c in COMMANDS}
 
 def _squad_name(key):
     return next((s["name"] for s in SQUADS if s["key"] == key), key or "Unknown Squad")
+
+
+def _squad_config_path(key):
+    squad = next((s for s in SQUADS if s["key"] == key), None)
+    if not squad:
+        return None
+    config_name = squad.get("config") or f"{squad['name']}.md"
+    return PROJECT_ROOT / "squads" / config_name
+
+
+def _squad_conf_parent_page_id(key):
+    """Read the selected squad's Confluence parent page ID from squads/*.md."""
+    path = _squad_config_path(key)
+    if not path or not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    for line in text.splitlines():
+        if "Confluence Parent Page" not in line:
+            continue
+        match = re.search(r"\bID:\s*`?(\d+)`?", line, re.I)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def fetch_sprint_data(squad_key, form_inputs):
@@ -1270,10 +1293,15 @@ def _push_doc_pvg(content, squad_key, inputs):
     ufrf2_key       = _push_meta.get("doc_pvg_issue_key", "")
     squad_name      = _squad_name(effective_squad)
     feature_title   = extract_title(content, "PVG")
+    parent_page_id  = _squad_conf_parent_page_id(effective_squad)
 
     yield "Creating PVG Confluence page…\n"
+    if parent_page_id:
+        yield f"Using {squad_name} Confluence parent page: {parent_page_id}\n"
+    else:
+        yield f"⚠ No confirmed Confluence parent page ID found for {squad_name}; publishing under UPP homepage.\n"
     pvg_title = f"PVG — {feature_title}"
-    page      = _conf_create_page(pvg_title, "UPP", markdown_to_confluence(content))
+    page      = _conf_create_page(pvg_title, "UPP", markdown_to_confluence(content), parent_page_id)
     page_id   = page.get("id", "")
     page_url = conf_url(page_id)
     yield f"✓ PVG page created: {pvg_title}\n"
