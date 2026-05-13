@@ -1058,16 +1058,25 @@ def _createmeta(project_key, issue_type_name=None):
             return {}, []
         issue_types = projects[0].get("issuetypes", [])
         names = [t.get("name", "") for t in issue_types]
-        fields = issue_types[0].get("fields", {}) if issue_types else {}
+        matched = None
+        if issue_type_name:
+            wanted = issue_type_name.strip().lower()
+            matched = next((t for t in issue_types if (t.get("name") or "").strip().lower() == wanted), None)
+        fields = (matched or issue_types[0]).get("fields", {}) if issue_types else {}
         return fields, names
     except Exception:
         return {}, []
 
 
-def _resolve_issuetype(squad_key, preferred="Story"):
+def _resolve_issuetype(squad_key, preferred="Story", allow_fallback=True):
     """Return the best available issue type name from the project."""
     _, names = _createmeta(squad_key)
     name_set = set(names)
+    if preferred in name_set:
+        return preferred
+    if not allow_fallback:
+        available = ", ".join(names) if names else "none returned by Jira"
+        raise RuntimeError(f"Issue type '{preferred}' is not available in project {squad_key}. Available types: {available}")
     for candidate in (preferred, "Story", "Task", "User Story"):
         if candidate in name_set:
             return candidate
@@ -1178,9 +1187,38 @@ def _story_parent_fields(project_key, issue_type, epic_key):
     return {"parent": {"key": epic_key}}
 
 
+def _epic_link_field_id():
+    try:
+        fields = jira_req("GET", "/field")
+    except Exception:
+        return ""
+    for field in fields:
+        if (field.get("name") or "").strip().lower() == "epic link":
+            return field.get("id", "")
+    return ""
+
+
+def _link_story_to_epic(child_key, epic_key):
+    attempts = [
+        {"parent": {"key": epic_key}},
+    ]
+    epic_link_field = _epic_link_field_id()
+    if epic_link_field:
+        attempts.append({epic_link_field: epic_key})
+
+    last_error = None
+    for fields in attempts:
+        try:
+            jira_req("PUT", f"/issue/{child_key}", json={"fields": fields})
+            return True, ""
+        except Exception as e:
+            last_error = e
+    return False, str(last_error) if last_error else "No supported Epic link field found"
+
+
 def _push_story(content, squad_key, inputs):
     title       = _extract_epic_title(content)
-    epic_type   = _resolve_issuetype(squad_key, "Epic")
+    epic_type   = _resolve_issuetype(squad_key, "Epic", allow_fallback=False)
     meta_fields = _fetch_create_meta(squad_key, epic_type)
     user_vals   = inputs.get("_push_fields", {})
     extra       = _build_extra_fields(meta_fields, user_vals)
@@ -1228,15 +1266,11 @@ def _push_story(content, squad_key, inputs):
             issue = jira_req("POST", "/issue", json={"fields": fields})
             child_key = issue.get("key", "")
             if child_key and epic_key:
-                try:
-                    jira_req("POST", "/issueLink", json={
-                        "type": {"name": "Relates"},
-                        "inwardIssue": {"key": epic_key},
-                        "outwardIssue": {"key": child_key},
-                    })
-                    yield f"  {idx}. Linked with fallback relationship: {child_key}\n"
-                except Exception:
-                    pass
+                linked, link_error = _link_story_to_epic(child_key, epic_key)
+                if linked:
+                    yield f"  {idx}. Linked to Epic: {child_key}\n"
+                else:
+                    yield f"  {idx}. ⚠ Created but could not link to Epic: {link_error}\n"
             if child_key:
                 yield f"  {idx}. ✓ {story_type} created: {child_key} - {jira_url(child_key)}\n"
             continue
