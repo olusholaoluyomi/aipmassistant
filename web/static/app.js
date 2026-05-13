@@ -37,10 +37,10 @@ const COMMANDS_DATA = [
     ],
   },
   {
-    "id": "story", "name": "Write User Story", "category": "Content",
+    "id": "story", "name": "Create Jira Epic", "category": "Content",
     "mode": "generate", "jira_fetch": false, "slug": "/story",
-    "needs_squad": true, "push_label": "Create Jira Story", "needs_backend": true,
-    "description": "AI drafts user story → you edit → creates Jira ticket via REST API",
+    "needs_squad": true, "push_label": "Create Epic + Approved Stories", "needs_backend": true,
+    "description": "AI drafts an Epic and suggested Stories -> you approve -> creates and links Jira tickets",
     "inputs": [
       {"id": "description", "label": "Feature description",
        "type": "textarea", "required": true,
@@ -77,12 +77,13 @@ const COMMANDS_DATA = [
   },
   {
     "id": "doc-pvg", "name": "Generate PVG", "category": "Content",
-    "mode": "generate", "jira_fetch": true, "slug": "/doc",
+    "mode": "generate", "jira_fetch": false, "slug": "/doc",
     "needs_squad": true, "push_label": "Publish PVG + Create Epic", "needs_backend": true,
-    "description": "Fetch UFRF2 item → AI generates Product Vision & Goal doc → publish to Confluence + create Epic",
+    "description": "Share feature context -> AI generates Product Vision & Goal doc -> publish to Confluence + create Epic",
     "inputs": [
-      {"id": "issue_key", "label": "UFRF2 issue key",
-       "type": "text", "required": true, "placeholder": "e.g. UFRF2-123"},
+      {"id": "feature_context", "label": "Feature / initiative context",
+       "type": "textarea", "required": true,
+       "placeholder": "Describe the problem, target users, goals, scope, non-goals, dependencies, and any known risks..."},
     ],
   },
   {
@@ -257,6 +258,7 @@ const state = {
   anthropicKey:      localStorage.getItem('aipm_anthropic_key') || '',
   companyContext:    localStorage.getItem('aipm_company_context') || '',
   jiraFetchMeta:     {},
+  storyApprovals:    [],
 };
 
 function apiUrl(path) {
@@ -1237,6 +1239,9 @@ async function startRun() {
 
 // ── Regenerate ─────────────────────────────────────────────────────────────
 regenerateBtn.addEventListener("click", startRun);
+editTextarea.addEventListener("input", () => {
+  if (state.activeCommand?.id === "story") renderStoryApprovals();
+});
 
 // ── Stream handler ─────────────────────────────────────────────────────────
 async function handleStream(response, phase) {
@@ -1349,6 +1354,8 @@ function showEditPanel() {
 
   const existing = document.getElementById("push-fields-form");
   if (existing) existing.remove();
+  const storyApprovalPanel = document.getElementById("story-approval-panel");
+  if (storyApprovalPanel) storyApprovalPanel.remove();
 
   if (cmd.push_label) {
     pushBtnLabel.textContent = cmd.push_label;
@@ -1358,6 +1365,7 @@ function showEditPanel() {
     if (["story", "idea", "doc-pvg"].includes(cmd.id) && state.currentSquad && state.backendConnected) {
       loadPushFields(cmd.id, state.currentSquad);
     }
+    renderStoryApprovals();
   } else {
     pushBtn.classList.add("hidden");
     editHint.textContent = "Analysis complete — copy or regenerate as needed.";
@@ -1427,6 +1435,92 @@ function gatherPushFields() {
   return result;
 }
 
+function parseSuggestedStories(content) {
+  const marker = content.match(/^##\s+Suggested Stories\s*$/im);
+  if (!marker) return [];
+
+  let section = content.slice(marker.index + marker[0].length);
+  const next = section.search(/^##\s+/m);
+  if (next >= 0) section = section.slice(0, next);
+
+  const headingPat = /^###\s+(?:Story\s*\d+\s*[:.\-]\s*)?(.+?)\s*$/gim;
+  const matches = [...section.matchAll(headingPat)];
+  if (matches.length) {
+    return matches.map((m, idx) => {
+      const start = m.index + m[0].length;
+      const end = idx + 1 < matches.length ? matches[idx + 1].index : section.length;
+      return {
+        id: `story-${idx}`,
+        title: m[1].trim(),
+        body: section.slice(start, end).trim() || m[1].trim(),
+      };
+    }).filter(s => s.title);
+  }
+
+  return section.split("\n")
+    .map((line, idx) => ({
+      id: `story-${idx}`,
+      title: line.replace(/^[-*]\s+(?:\[[ x]\]\s*)?/i, "").trim(),
+      body: line.replace(/^[-*]\s+(?:\[[ x]\]\s*)?/i, "").trim(),
+    }))
+    .filter(s => s.title);
+}
+
+function renderStoryApprovals() {
+  const existing = document.getElementById("story-approval-panel");
+  if (existing) existing.remove();
+
+  state.storyApprovals = [];
+  if (state.activeCommand?.id !== "story") return;
+
+  const stories = parseSuggestedStories(editTextarea.value);
+  state.storyApprovals = stories;
+  if (!stories.length) {
+    editHint.textContent = "No structured Story suggestions found. The Epic will still be created.";
+    editHint.style.display = "";
+    return;
+  }
+
+  const panel = document.createElement("div");
+  panel.id = "story-approval-panel";
+  panel.className = "story-approval-panel";
+
+  const heading = document.createElement("div");
+  heading.className = "story-approval-heading";
+  heading.textContent = "Approve Stories to create under the Epic";
+  panel.appendChild(heading);
+
+  stories.forEach((story, idx) => {
+    const label = document.createElement("label");
+    label.className = "story-approval-row";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = true;
+    checkbox.dataset.storyIndex = String(idx);
+    checkbox.className = "story-approval-checkbox";
+
+    const text = document.createElement("span");
+    text.className = "story-approval-title";
+    text.textContent = story.title;
+
+    label.appendChild(checkbox);
+    label.appendChild(text);
+    panel.appendChild(label);
+  });
+
+  const actionsRow = document.querySelector(".edit-actions");
+  if (actionsRow) actionsRow.before(panel);
+}
+
+function gatherApprovedStories() {
+  if (state.activeCommand?.id !== "story") return [];
+  return [...document.querySelectorAll(".story-approval-checkbox:checked")]
+    .map(el => state.storyApprovals[Number(el.dataset.storyIndex)])
+    .filter(Boolean)
+    .map(story => ({ title: story.title, body: story.body }));
+}
+
 // ── Push ───────────────────────────────────────────────────────────────────
 pushBtn.addEventListener("click", doPush);
 
@@ -1460,6 +1554,7 @@ function doPush() {
       inputs:      gatherInputs(cmd),
       push_fields: gatherPushFields(),
       push_meta:   state.jiraFetchMeta,
+      approved_stories: gatherApprovedStories(),
     }),
   }).then(res => handlePushStream(res)).catch(onPushError);
 }

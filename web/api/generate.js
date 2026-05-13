@@ -54,30 +54,52 @@ Be direct. Skip the fluffy preamble.`,
   },
 
   story: {
-    instructions: "Write a Jira user story. Be specific and professional. Use business language. Keep acceptance criteria precise and testable.",
+    instructions: `Write a Jira Epic with a short list of implementation-ready child Stories. Be specific and professional. Use business language. Keep acceptance criteria precise and testable.
+
+Output format:
+## Epic: [clear Epic title]
+**Epic Summary:** [one sentence]
+
+### Business Outcome
+[2-3 bullets on value, adoption, revenue, retention, compliance, or operational impact]
+
+### Scope
+[3-5 bullets describing what is included]
+
+### Non-Goals
+[1-3 bullets, or "None"]
+
+### Acceptance Criteria
+[Epic-level acceptance criteria]
+
+## Suggested Stories
+### Story 1: [short Story title]
+[One-sentence purpose]
+
+#### Acceptance Criteria
+[Story-level acceptance criteria]
+
+#### Notes
+[Dependencies, edge cases, story point estimate, or technical notes when requested]
+
+Repeat for 3-6 small Stories that can be individually approved and created under the Epic.`,
     user: (squad, inputs) => {
       const acFormat = inputs.ac_format || "gherkin";
       const extras = (inputs.extras || "story_points,dependencies").split(",").map(s => s.trim()).filter(Boolean);
       const acFormats = {
         "gherkin":    "Gherkin format:\n- **Given** [context], **When** [action], **Then** [expected result]",
         "checklist":  "Checklist format:\n- [ ] [acceptance criterion]",
-        "test-cases": "Numbered test cases:\n1. [Scenario] → **Expected:** [result]",
+        "test-cases": "Numbered test cases:\n1. [Scenario] -> **Expected:** [result]",
       };
       const acInstruction = acFormats[acFormat] || acFormats["gherkin"];
-      const sections = [
-        "## User Story",
-        "**As a** [user type], **I want to** [action], **so that** [benefit].",
-        "",
-        "## Acceptance Criteria",
-        `Write 3–5 criteria in ${acInstruction}`,
-      ];
-      if (extras.includes("edge_cases"))      sections.push("", "## Edge Cases", "List 2–3 edge cases or failure scenarios to handle.");
-      if (extras.includes("story_points"))    sections.push("", "## Story Points", "Estimate: 1, 2, 3, 5, or 8 — with a one-line rationale.");
-      if (extras.includes("dependencies"))    sections.push("", "## Dependencies & Notes", "List dependencies or write \"None\".");
-      if (extras.includes("technical_notes")) sections.push("", "## Technical Notes", "Any technical considerations the dev team should know.");
-      return `Squad: ${squad}\n\nFeature: ${inputs.description || ""}\n\nOutput format:\n${sections.join("\n")}`;
+      const extrasText = [];
+      if (extras.includes("edge_cases"))      extrasText.push("Call out edge cases in the relevant Story notes.");
+      if (extras.includes("story_points"))    extrasText.push("Add a small Story point estimate to each Story note.");
+      if (extras.includes("dependencies"))    extrasText.push("List dependencies in the relevant Story notes, or write \"None\".");
+      if (extras.includes("technical_notes")) extrasText.push("Add implementation notes where useful.");
+      return `Squad: ${squad}\n\nFeature / initiative: ${inputs.description || ""}\n\nAcceptance criteria style: ${acInstruction}\n\nStory guidance:\n- Suggest 3-6 small Stories under the Epic.\n- Each Story should be independently shippable or testable.\n- Keep Story titles short and action-oriented.\n${extrasText.map(x => "- " + x).join("\n")}`;
     },
-    maxTokens: 2048,
+    maxTokens: 4096,
   },
 
   "release-notes": {
@@ -108,7 +130,7 @@ Completed tickets:\n${context || "No completed tickets found."}`;
   },
 
   "doc-pvg": {
-    instructions: `Write a detailed Product Vision & Goal (PVG) document from the roadmap item provided. This is an internal product strategy document used to align the squad before development.
+    instructions: `Write a detailed Product Vision & Goal (PVG) document from the PM context provided. This is an internal product strategy document used to align the squad before development.
 
 Output format:
 ## Product Vision & Goal
@@ -141,8 +163,8 @@ Output format:
 [Known risks and decisions still to be made]
 
 Write for a senior PM audience.`,
-    user: (squad, inputs, context) =>
-      `Squad: ${squad}\n\nRoadmap Item:\n${context || "No item data found."}`,
+    user: (squad, inputs) =>
+      `Squad: ${squad}\n\nPM-provided feature context:\n${inputs.feature_context || inputs.description || ""}`,
     maxTokens: 8192,
   },
 

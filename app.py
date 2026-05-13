@@ -540,10 +540,10 @@ COMMANDS = [
     },
     # ── Content ──────────────────────────────────────────────────────────────
     {
-        "id": "story", "name": "Write User Story", "category": "Content",
+        "id": "story", "name": "Create Jira Epic", "category": "Content",
         "mode": "generate", "jira_fetch": False, "slug": "/story",
-        "needs_squad": True, "push_label": "Create Jira Story",
-        "description": "AI drafts user story → you edit → creates Jira ticket via REST API",
+        "needs_squad": True, "push_label": "Create Epic + Approved Stories",
+        "description": "AI drafts an Epic and suggested Stories → you approve → creates and links Jira tickets",
         "inputs": [
             {"id": "description", "label": "Feature description",
              "type": "textarea", "required": True,
@@ -579,12 +579,13 @@ COMMANDS = [
     },
     {
         "id": "doc-pvg", "name": "Generate PVG", "category": "Content",
-        "mode": "generate", "jira_fetch": True, "slug": "/doc",
+        "mode": "generate", "jira_fetch": False, "slug": "/doc",
         "needs_squad": True, "push_label": "Publish PVG + Create Epic",
-        "description": "Fetch UFRF2 item → AI generates Product Vision & Goal doc → publish to Confluence + create Epic",
+        "description": "Share feature context → AI generates Product Vision & Goal doc → publish to Confluence + create Epic",
         "inputs": [
-            {"id": "issue_key", "label": "UFRF2 issue key",
-             "type": "text", "required": True, "placeholder": "e.g. UFRF2-123"},
+            {"id": "feature_context", "label": "Feature / initiative context",
+             "type": "textarea", "required": True,
+             "placeholder": "Describe the problem, target users, goals, scope, non-goals, dependencies, and any known risks…"},
         ],
     },
     {
@@ -991,7 +992,6 @@ JIRA_FETCH_MAP = {
     "daily":          (fetch_sprint_data,    "Fetching active sprint from Jira"),
     "sprint-analysis":(fetch_sprint_data,    "Fetching sprint issues from Jira"),
     "release-notes":  (fetch_release_tickets,"Fetching completed tickets from Jira"),
-    "doc-pvg":        (fetch_ufrf2_item,     "Fetching UFRF2 item from Jira"),
     "rfo":            (fetch_incident_ticket,"Fetching incident ticket from Jira"),
     "fcb-weekly":     (fetch_fcb_items,      "Fetching Customer Askings from Jira"),
 }
@@ -1096,24 +1096,129 @@ def _build_extra_fields(meta_fields, user_values):
     return extra
 
 
+def _extract_epic_title(content):
+    """Prefer an explicit Epic heading/summary over generic section names."""
+    for line in content.splitlines():
+        s = line.strip()
+        m = re.match(r"^#{1,3}\s*Epic\s*[:\-]\s*(.+)$", s, re.I)
+        if m:
+            return m.group(1).strip()[:120]
+    for line in content.splitlines():
+        s = line.strip()
+        m = re.match(r"^\*\*Epic Summary\*\*\s*[:\-]\s*(.+)$", s, re.I)
+        if m:
+            return m.group(1).strip()[:120]
+        m = re.match(r"^Epic Summary\s*[:\-]\s*(.+)$", s, re.I)
+        if m:
+            return m.group(1).strip()[:120]
+    return extract_title(content, "Epic")
+
+
+def _extract_suggested_stories(content):
+    """Parse the generated Suggested Stories section into Jira story drafts."""
+    match = re.search(r"^##\s+Suggested Stories\s*$", content, re.I | re.M)
+    if not match:
+        return []
+    section = content[match.end():]
+    next_section = re.search(r"^##\s+", section, re.M)
+    if next_section:
+        section = section[:next_section.start()]
+
+    stories = []
+    heading_pat = re.compile(r"^###\s+(?:Story\s*\d+\s*[:.\-]\s*)?(.+?)\s*$", re.I | re.M)
+    matches = list(heading_pat.finditer(section))
+    for idx, item in enumerate(matches):
+        title = item.group(1).strip()
+        start = item.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(section)
+        body = section[start:end].strip()
+        if title:
+            stories.append({"title": title[:120], "body": body or title})
+
+    if stories:
+        return stories
+
+    for line in section.splitlines():
+        s = re.sub(r"^[-*]\s+(?:\[[ xX]\]\s*)?", "", line.strip())
+        if s:
+            stories.append({"title": s[:120], "body": s})
+    return stories
+
+
+def _story_parent_fields(project_key, issue_type, epic_key):
+    fields, _ = _createmeta(project_key, issue_type)
+    if "parent" in fields:
+        return {"parent": {"key": epic_key}}
+    for fid, field in fields.items():
+        if (field.get("name") or "").strip().lower() == "epic link":
+            return {fid: epic_key}
+    return {"parent": {"key": epic_key}}
+
+
 def _push_story(content, squad_key, inputs):
-    title       = extract_title(content, "User Story")
-    issue_type  = _resolve_issuetype(squad_key, "Story")
-    meta_fields = _fetch_create_meta(squad_key, issue_type)
+    title       = _extract_epic_title(content)
+    epic_type   = _resolve_issuetype(squad_key, "Epic")
+    meta_fields = _fetch_create_meta(squad_key, epic_type)
     user_vals   = inputs.get("_push_fields", {})
     extra       = _build_extra_fields(meta_fields, user_vals)
-    yield f"Creating Jira {issue_type} in {squad_key}…\n"
+    yield f"Creating Jira {epic_type} in {squad_key}…\n"
     result = jira_req("POST", "/issue", json={"fields": {
         "project":     {"key": squad_key},
         "summary":     title,
         "description": markdown_to_adf(content),
-        "issuetype":   {"name": issue_type},
+        "issuetype":   {"name": epic_type},
         **extra,
     }})
-    key = result.get("key", "")
-    yield f"✓ {issue_type} created: {key}\n"
-    if key:
-        yield f"{jira_url(key)}\n"
+    epic_key = result.get("key", "")
+    yield f"✓ {epic_type} created: {epic_key}\n"
+    if epic_key:
+        yield f"{jira_url(epic_key)}\n"
+
+    approved = inputs.get("_approved_stories")
+    stories = approved if isinstance(approved, list) else _extract_suggested_stories(content)
+    stories = [s for s in stories if isinstance(s, dict) and s.get("title")]
+    if not stories:
+        yield "No approved Stories selected. Epic created without child Stories.\n"
+        return
+
+    story_type = _resolve_issuetype(squad_key, "Story")
+    story_meta = _fetch_create_meta(squad_key, story_type)
+    story_extra = _build_extra_fields(story_meta, user_vals)
+    yield f"\nCreating {len(stories)} approved {story_type} issue(s) under {epic_key}…\n"
+    for idx, story in enumerate(stories, start=1):
+        story_title = str(story.get("title", "")).strip()[:120]
+        story_body  = str(story.get("body", "")).strip() or story_title
+        fields = {
+            "project":     {"key": squad_key},
+            "summary":     story_title,
+            "description": markdown_to_adf(story_body),
+            "issuetype":   {"name": story_type},
+            **story_extra,
+        }
+        parent_payload = _story_parent_fields(squad_key, story_type, epic_key) if epic_key else {}
+        fields.update(parent_payload)
+        try:
+            issue = jira_req("POST", "/issue", json={"fields": fields})
+        except Exception:
+            for field_id in parent_payload:
+                fields.pop(field_id, None)
+            issue = jira_req("POST", "/issue", json={"fields": fields})
+            child_key = issue.get("key", "")
+            if child_key and epic_key:
+                try:
+                    jira_req("POST", "/issueLink", json={
+                        "type": {"name": "Relates"},
+                        "inwardIssue": {"key": epic_key},
+                        "outwardIssue": {"key": child_key},
+                    })
+                    yield f"  {idx}. Linked with fallback relationship: {child_key}\n"
+                except Exception:
+                    pass
+            if child_key:
+                yield f"  {idx}. ✓ {story_type} created: {child_key} - {jira_url(child_key)}\n"
+            continue
+        child_key = issue.get("key", "")
+        yield f"  {idx}. ✓ {story_type} created: {child_key} - {jira_url(child_key)}\n"
 
 
 def _push_doc_feature(content, squad_key, inputs):
@@ -1159,10 +1264,10 @@ def _push_release_notes(content, squad_key, inputs):
 
 
 def _push_doc_pvg(content, squad_key, inputs):
-    # Squad key may have been inferred from product_area during fetch
+    # Squad key may have been inferred from product_area only for legacy UFRF2-based drafts.
     _push_meta = inputs.get("_push_meta", {})
-    effective_squad = _push_meta.get("doc_pvg_squad_key") or session.get("doc_pvg_squad_key") or squad_key
-    ufrf2_key       = _push_meta.get("doc_pvg_issue_key") or session.get("doc_pvg_issue_key") or inputs.get("issue_key", "")
+    effective_squad = _push_meta.get("doc_pvg_squad_key") or squad_key
+    ufrf2_key       = _push_meta.get("doc_pvg_issue_key", "")
     squad_name      = _squad_name(effective_squad)
     feature_title   = extract_title(content, "PVG")
 
@@ -1443,7 +1548,7 @@ def api_jira_fetch():
 def api_push_fields(command_id, squad_key):
     """Return required Jira fields (with allowed values) for a push action."""
     COMMAND_ISSUE_MAP = {
-        "story":   (squad_key, "Story"),
+        "story":   (squad_key, "Epic"),
         "idea":    ("UFRF2",   "Idea"),
         "doc-pvg": (squad_key, "Epic"),
     }
@@ -1552,6 +1657,7 @@ def api_push():
     inputs     = dict(data.get("inputs", {}))
     inputs["_push_fields"] = data.get("push_fields", {})
     inputs["_push_meta"]   = data.get("push_meta", {})
+    inputs["_approved_stories"] = data.get("approved_stories", [])
 
     if not content:
         return jsonify({"error": "No content to push"}), 400

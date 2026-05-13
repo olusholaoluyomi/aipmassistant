@@ -510,6 +510,29 @@ select.field-input:disabled { opacity: 0.55; cursor: not-allowed; }
 }
 
 /* ── Push result panel ────────────────────────────────────────────────── */
+.story-approval-panel {
+  border-top: 1px solid var(--border);
+  padding: 10px 20px;
+  background: var(--bg);
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 180px; overflow-y: auto;
+}
+.story-approval-heading {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.5px; color: var(--muted);
+}
+.story-approval-row {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 12px; color: var(--text);
+  padding: 6px 8px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--panel);
+  cursor: pointer;
+}
+.story-approval-checkbox { flex-shrink: 0; }
+.story-approval-title {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .push-panel {
   border-top: 1px solid var(--border);
   background: var(--bg);
